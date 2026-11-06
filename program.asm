@@ -20,8 +20,17 @@ TitleScreen PROTO                           ; shows the title screen
 ClearBuffer PROTO                           ; fills frameBuffer with spaces
 HideCursor  PROTO                           ; hides the blinking console cursor
 DrawBuffer  PROTO                           ; copies frameBuffer to the console
-DrawBar     PROTO                           ; (test) EAX = column, draws a '#' bar
-TestBarLoop PROTO                           ; (test) moving bar animation
+GetMoveDelta PROTO                          ; returns EAX = dx, EDX = dy for one step forward
+IsWall      PROTO, testX:SDWORD, testY:SDWORD     ; EAX = 1 if (testX,testY) is inside a wall
+TryMove     PROTO, moveDX:SDWORD, moveDY:SDWORD   ; moves the player if no wall is in the way
+TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
+HandleInput PROTO                           ; reads one key (no waiting) and acts on it
+DrawMinimap PROTO                           ; copies map + 'P' into the frame buffer
+GameLoop    PROTO                           ; main loop of the game
+
+; ---------- movement settings ----------
+MOVE_SPEED = 32                             ; one step = 32/256 = 1/8 of a cell (Q8)
+TURN_STEP  = 5                              ; degrees turned per A/D key press
 
 .data
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
@@ -49,6 +58,10 @@ posY      DWORD 384                         ; Y = 1.5 cells (1*256 + 128), centr
 angle     DWORD 0                           ; facing direction in degrees (0..359), 0 = east
 steps     DWORD 0                           ; number of steps the player has taken
 startTime DWORD 0                           ; time (ms from GetMSeconds) when the game started
+
+; ---------- game state flags ----------
+showMinimap BYTE 1                          ; 1 = minimap visible, 0 = hidden (M toggles)
+quitFlag    BYTE 0                          ; becomes 1 when the player presses Q
 
 ; ---------- sine table: sinTable[d] = round(sin(d degrees) * 256) ----------
 sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
@@ -113,7 +126,7 @@ pressKey   BYTE "Press any key to start...", 0       ; prompt
 ;-------------------------------------------------------------
 ; main
 ; Purpose:   Program entry. Shows the title screen, runs the
-;            temporary moving-bar test, then exits.
+;            game loop until the player quits, then exits.
 ; Receives:  nothing
 ; Returns:   nothing (ends the program)
 ; Registers: none kept (program ends)
@@ -122,7 +135,7 @@ main PROC
     INVOKE HideCursor                       ; get console handle and hide the cursor
     INVOKE TitleScreen                      ; show the title screen and wait for a key
     call   Clrscr                           ; wipe the title text off the screen
-    INVOKE TestBarLoop                      ; TEMPORARY: test the frame buffer drawing
+    INVOKE GameLoop                         ; play until quitFlag is set
     INVOKE ExitProcess, 0                   ; end the program with exit code 0
 main ENDP
 
@@ -279,57 +292,216 @@ RowLoop:
 DrawBuffer ENDP
 
 ;-------------------------------------------------------------
-; DrawBar  (TEMPORARY TEST)
-; Purpose:   Draw a vertical bar of '#' down one column of
-;            the frameBuffer (all 24 rows).
-; Receives:  EAX = column (0..79)
-; Returns:   nothing
-; Registers: none (ECX, EDI saved by USES)
+; GetMoveDelta
+; Purpose:   Work out how far one forward step moves the
+;            player in X and in Y, for the current angle.
+;            dx = cos(angle) * MOVE_SPEED / 256
+;            dy = sin(angle) * MOVE_SPEED / 256
+; Receives:  angle (global)
+; Returns:   EAX = dx (Q8), EDX = dy (Q8)
+; Registers: EAX, EDX
 ;-------------------------------------------------------------
-DrawBar PROC USES ecx edi
-    mov  edi, OFFSET frameBuffer            ; EDI = start of buffer (row 0)
-    add  edi, eax                           ; move to the chosen column in row 0
-    mov  ecx, SCREEN_H                      ; ECX = 24 rows to fill
-BarRow:
-    mov  BYTE PTR [edi], '#'                ; put a '#' in this row
-    add  edi, SCREEN_W                      ; jump down one row (80 bytes further)
-    loop BarRow                             ; ECX--, repeat until ECX = 0
+GetMoveDelta PROC
+    mov  eax, angle                         ; EAX = current angle
+    call GetCos                             ; EAX = cos(angle) * 256
+    imul eax, MOVE_SPEED                    ; EAX = cos * 256 * MOVE_SPEED
+    sar  eax, 8                             ; divide by 256 (keeps the sign) -> dx in Q8
+    push eax                                ; save dx on the stack
+    mov  eax, angle                         ; EAX = current angle
+    call GetSin                             ; EAX = sin(angle) * 256
+    imul eax, MOVE_SPEED                    ; EAX = sin * 256 * MOVE_SPEED
+    sar  eax, 8                             ; divide by 256 (keeps the sign) -> dy in Q8
+    mov  edx, eax                           ; EDX = dy
+    pop  eax                                ; EAX = dx again
     ret                                     ; back to caller
-DrawBar ENDP
+GetMoveDelta ENDP
 
 ;-------------------------------------------------------------
-; TestBarLoop  (TEMPORARY TEST)
-; Purpose:   Draw 100 frames of a '#' bar moving right,
-;            30 ms per frame. Q quits early.
+; IsWall
+; Purpose:   Check if a Q8 position is inside a wall cell.
+; Receives:  testX, testY = position in Q8 (cells * 256)
+; Returns:   EAX = 1 if that cell is '#', else 0
+; Registers: EAX (EBX saved by USES)
+;-------------------------------------------------------------
+IsWall PROC USES ebx, testX:SDWORD, testY:SDWORD
+    mov  eax, testY                         ; EAX = Y in Q8
+    sar  eax, 8                             ; EAX = row (whole cells)
+    shl  eax, 4                             ; EAX = row * 16 (start of that map row)
+    mov  ebx, testX                         ; EBX = X in Q8
+    sar  ebx, 8                             ; EBX = column (whole cells)
+    add  eax, ebx                           ; EAX = row*16 + col = index into gameMap
+    cmp  gameMap[eax], '#'                  ; is that cell a wall?
+    je   HitWall                            ; yes
+    mov  eax, 0                             ; no: return 0
+    jmp  WallDone                           ; skip the "wall" part
+HitWall:
+    mov  eax, 1                             ; return 1 (wall)
+WallDone:
+    ret                                     ; back to caller
+IsWall ENDP
+
+;-------------------------------------------------------------
+; TryMove
+; Purpose:   Move the player by (moveDX, moveDY) if no wall is
+;            in the way. X and Y are checked separately so the
+;            player slides along walls. steps++ if it moved.
+; Receives:  moveDX, moveDY = movement in Q8
+; Returns:   posX, posY, steps updated
+; Registers: none (EAX, ECX, EDX saved by USES)
+;-------------------------------------------------------------
+TryMove PROC USES eax ecx edx, moveDX:SDWORD, moveDY:SDWORD
+    mov  ecx, 0                             ; ECX = 1 once we really move
+    cmp  moveDX, 0                          ; any X movement at all?
+    je   TryY                               ; no: skip the X test
+    mov  edx, posX                          ; EDX = current X
+    add  edx, moveDX                        ; EDX = new X
+    INVOKE IsWall, edx, posY                ; new X with OLD Y: wall?
+    cmp  eax, 0                             ; 0 means free
+    jne  TryY                               ; wall: do not move in X
+    mov  posX, edx                          ; free: accept the new X
+    mov  ecx, 1                             ; remember that we moved
+TryY:
+    cmp  moveDY, 0                          ; any Y movement at all?
+    je   MoveDone                           ; no: skip the Y test
+    mov  edx, posY                          ; EDX = current Y
+    add  edx, moveDY                        ; EDX = new Y
+    INVOKE IsWall, posX, edx                ; (maybe new) X with new Y: wall?
+    cmp  eax, 0                             ; 0 means free
+    jne  MoveDone                           ; wall: do not move in Y
+    mov  posY, edx                          ; free: accept the new Y
+    mov  ecx, 1                             ; remember that we moved
+MoveDone:
+    cmp  ecx, 0                             ; did we move at all?
+    je   NoStep                             ; no: steps stay the same
+    inc  steps                              ; yes: count one step
+NoStep:
+    ret                                     ; back to caller
+TryMove ENDP
+
+;-------------------------------------------------------------
+; TurnPlayer
+; Purpose:   Add turnAmount to angle and keep it in 0..359.
+; Receives:  turnAmount = degrees to turn (+ right, - left)
+; Returns:   angle updated
+; Registers: none (EAX saved by USES)
+;-------------------------------------------------------------
+TurnPlayer PROC USES eax, turnAmount:SDWORD
+    mov  eax, angle                         ; EAX = current angle
+    add  eax, turnAmount                    ; turn
+    cmp  eax, 0                             ; went below 0? (signed compare)
+    jge  NotNegative                        ; no
+    add  eax, 360                           ; yes: e.g. -5 becomes 355
+NotNegative:
+    cmp  eax, 360                           ; reached 360 or more?
+    jl   AngleInRange                       ; no
+    sub  eax, 360                           ; yes: e.g. 360 becomes 0
+AngleInRange:
+    mov  angle, eax                         ; save the new angle
+    ret                                     ; back to caller
+TurnPlayer ENDP
+
+;-------------------------------------------------------------
+; HandleInput
+; Purpose:   Read one key without waiting and act on it:
+;            W/S move, A/D turn, M toggles minimap, Q quits.
+; Receives:  nothing
+; Returns:   posX/posY/angle/showMinimap/quitFlag may change
+; Registers: none (EAX, EBX, EDX saved by USES)
+;-------------------------------------------------------------
+HandleInput PROC USES eax ebx edx
+    call ReadKey                            ; AL = key; ZF = 1 if no key (also changes EBX, EDX)
+    jz   InputDone                          ; no key this frame
+    and  al, 11011111b                      ; clear bit 5: turns 'a'..'z' into 'A'..'Z'
+    cmp  al, 'W'                            ; forward?
+    jne  NotW                               ; no
+    call GetMoveDelta                       ; EAX = dx, EDX = dy
+    INVOKE TryMove, eax, edx                ; move forward if possible
+    jmp  InputDone                          ; finished
+NotW:
+    cmp  al, 'S'                            ; backward?
+    jne  NotS                               ; no
+    call GetMoveDelta                       ; EAX = dx, EDX = dy
+    neg  eax                                ; reverse X direction
+    neg  edx                                ; reverse Y direction
+    INVOKE TryMove, eax, edx                ; move backward if possible
+    jmp  InputDone                          ; finished
+NotS:
+    cmp  al, 'A'                            ; turn left?
+    jne  NotA                               ; no
+    INVOKE TurnPlayer, -TURN_STEP           ; angle - 5
+    jmp  InputDone                          ; finished
+NotA:
+    cmp  al, 'D'                            ; turn right?
+    jne  NotD                               ; no
+    INVOKE TurnPlayer, TURN_STEP            ; angle + 5
+    jmp  InputDone                          ; finished
+NotD:
+    cmp  al, 'M'                            ; minimap toggle?
+    jne  NotM                               ; no
+    xor  showMinimap, 1                     ; 1 -> 0 or 0 -> 1
+    jmp  InputDone                          ; finished
+NotM:
+    cmp  al, 'Q'                            ; quit?
+    jne  InputDone                          ; no: ignore this key
+    mov  quitFlag, 1                        ; tell the game loop to stop
+InputDone:
+    ret                                     ; back to caller
+HandleInput ENDP
+
+;-------------------------------------------------------------
+; DrawMinimap
+; Purpose:   If showMinimap = 1, copy the 16x16 map into the
+;            top-left of frameBuffer and put 'P' on the
+;            player's cell.
+; Receives:  nothing (uses gameMap, posX, posY)
+; Returns:   nothing
+; Registers: none (EAX, ECX, EDX, ESI, EDI saved by USES)
+;-------------------------------------------------------------
+DrawMinimap PROC USES eax ecx edx esi edi
+    cmp  showMinimap, 0                     ; is the minimap hidden?
+    je   MapDone                            ; yes: draw nothing
+    cld                                     ; copy forwards
+    mov  esi, OFFSET gameMap                ; ESI = source (map row 0)
+    mov  edi, OFFSET frameBuffer            ; EDI = destination (screen row 0, col 0)
+    mov  edx, MAP_H                         ; EDX = 16 rows to copy
+CopyRow:
+    mov  ecx, MAP_W                         ; ECX = 16 bytes in one map row
+    rep  movsb                              ; copy [ESI] -> [EDI], 16 times (both move on)
+    add  edi, SCREEN_W - MAP_W              ; skip the other 64 screen columns to the next row
+    dec  edx                                ; one row done
+    jnz  CopyRow                            ; more rows left: copy the next
+    mov  eax, posY                          ; EAX = Y in Q8
+    sar  eax, 8                             ; EAX = player row
+    imul eax, SCREEN_W                      ; EAX = row * 80 (start of that screen row)
+    mov  edx, posX                          ; EDX = X in Q8
+    sar  edx, 8                             ; EDX = player column
+    add  eax, edx                           ; EAX = row*80 + col
+    mov  frameBuffer[eax], 'P'              ; mark the player
+MapDone:
+    ret                                     ; back to caller
+DrawMinimap ENDP
+
+;-------------------------------------------------------------
+; GameLoop
+; Purpose:   Run frames until the player presses Q:
+;            input -> clear -> minimap -> draw -> wait 30 ms.
 ; Receives:  nothing
 ; Returns:   nothing
-; Registers: none (EAX, EBX, ECX, EDX saved by USES)
+; Registers: none (EAX saved by USES)
 ;-------------------------------------------------------------
-TestBarLoop PROC USES eax ebx ecx edx
-    mov  ebx, 0                             ; EBX = frame number, start at 0
+GameLoop PROC USES eax
 FrameLoop:
-    call ClearBuffer                        ; start each frame with a blank buffer
-    mov  eax, ebx                           ; EAX = frame number
-    mov  edx, 0                             ; clear EDX before DIV
-    mov  ecx, SCREEN_W                      ; divide by 80
-    div  ecx                                ; EDX = frame mod 80 (bar column)
-    mov  eax, edx                           ; EAX = column for DrawBar
-    call DrawBar                            ; put the bar in the buffer
-    call DrawBuffer                         ; show the buffer on screen
+    call HandleInput                        ; read keys, move/turn the player
+    cmp  quitFlag, 1                        ; did the player press Q?
+    je   LoopDone                           ; yes: leave the loop
+    call ClearBuffer                        ; blank frame
+    call DrawMinimap                        ; map + player into the buffer
+    call DrawBuffer                         ; show the frame on screen
     mov  eax, 30                            ; 30 milliseconds
-    call Delay                              ; wait so we can see the frame
-    call ReadKey                            ; check for a key (does not wait)
-    jz   NoKey                              ; ZF = 1 means no key was pressed
-    cmp  al, 'q'                            ; lowercase q?
-    je   TestDone                           ; yes: stop
-    cmp  al, 'Q'                            ; uppercase Q?
-    je   TestDone                           ; yes: stop
-NoKey:
-    inc  ebx                                ; next frame
-    cmp  ebx, 100                           ; done 100 frames?
-    jb   FrameLoop                          ; no: draw another
-TestDone:
+    call Delay                              ; wait before the next frame
+    jmp  FrameLoop                          ; next frame
+LoopDone:
     ret                                     ; back to caller
-TestBarLoop ENDP
+GameLoop ENDP
 
 END main                                    ; program starts at main
