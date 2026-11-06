@@ -15,6 +15,7 @@ FOV      = 60                               ; field of view in degrees
 
 ; ---------- Win32 function not declared in SmallWin.inc (lives in user32.lib) ----------
 GetAsyncKeyState PROTO, vKey:DWORD          ; AX bit 15 = 1 if the key is held down right now
+SetConsoleOutputCP PROTO, wCodePageID:DWORD ; (kernel32.lib) choose which character set the console shows
 
 ; ---------- procedure prototypes ----------
 GetSin      PROTO                           ; EAX = angle in, EAX = sin*256 out
@@ -35,9 +36,11 @@ WrapAngle   PROTO                           ; EAX = angle in, EAX = same angle w
 AnyKeyDown  PROTO                           ; EAX = 1 if any keyboard key is held
 WaitKeysReleased PROTO                      ; waits until keys are let go, sets mWasDown/qWasDown
 SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
-CastRay     PROTO, rayAngle:DWORD           ; EAX = corrected distance to the first wall (Q8)
+CastRay     PROTO, rayAngle:DWORD           ; EAX = corrected wall distance (Q8), EDX = hitSide
+GetWallChar PROTO, distance:DWORD, side:DWORD     ; EAX = shaded block character for a wall
+GetFloorChar PROTO                          ; ECX = row in, EAX = floor character for that row
 GetWallHeight PROTO                         ; EAX = distance in, EAX = wall height in rows
-DrawColumn  PROTO, column:DWORD, wallHeight:DWORD ; draws one screen column (sky, wall, floor)
+DrawColumn  PROTO, column:DWORD, wallHeight:DWORD, wallChar:DWORD ; draws one screen column
 RenderView  PROTO                           ; casts 80 rays and draws the 3D view
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
 HandleInput PROTO                           ; reads one key (no waiting) and acts on it
@@ -52,6 +55,8 @@ MARGIN     = 64                             ; keep 64/256 = 1/4 cell away from w
 ; ---------- raycasting settings ----------
 BIG_DIST   = 1000000                        ; "infinite" distance, used when a ray never crosses an axis
 KEY_WAIT_TRIES = 200                        ; max 200 x 10 ms = 2 s waiting for keys to be released
+CODE_PAGE_437  = 437                        ; old IBM PC character set (has the block characters)
+FLOOR_BAND     = 3                          ; each floor shade covers 3 rows
 
 .data
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
@@ -125,6 +130,14 @@ sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
          SDWORD  -88, -83, -79, -75, -71, -66, -62, -58, -53, -49   ; 340-349 deg
          SDWORD  -44, -40, -36, -31, -27, -22, -18, -13,  -9,  -4   ; 350-359 deg
 
+; ---------- shading data ----------
+; wall distance limits in Q8 (256 = 1 cell): closer than shadeDist1 = level 0, etc.
+shadeDist1  DWORD 512                       ; under 2 cells  -> level 0 (darkest/solid)
+shadeDist2  DWORD 1024                      ; under 4 cells  -> level 1
+shadeDist3  DWORD 2048                      ; under 8 cells  -> level 2, else level 3
+wallShades  BYTE 219, 178, 177, 176         ; code page 437: full block, dark, medium, light
+floorShades BYTE '#', 'x', '-', '.'         ; floor: nearest rows first
+
 ; ---------- screen drawing data ----------
 frameBuffer   BYTE SCREEN_W * SCREEN_H DUP(' ')   ; 80x24 = 1920 chars, cell (row,col) at row*80 + col
 consoleHandle DWORD ?                       ; handle of the console output (set by HideCursor)
@@ -156,7 +169,8 @@ pressKey   BYTE "Press any key to start...", 0       ; prompt
 ; Registers: none kept (program ends)
 ;-------------------------------------------------------------
 main PROC
-    INVOKE HideCursor                       ; get console handle and hide the cursor
+    INVOKE SetConsoleOutputCP, CODE_PAGE_437 ; show bytes 176..219 as block characters
+    INVOKE HideCursor                      ; get console handle and hide the cursor
     INVOKE InitInput                        ; get console input handle (for flushing keys)
     INVOKE TitleScreen                      ; show the title screen and wait for a key
     INVOKE WaitKeysReleased                 ; make sure the closing key can't trigger M or Q
@@ -740,9 +754,11 @@ SetupAxis ENDP
 ; Receives:  rayAngle = ray direction in degrees (0..359)
 ; Returns:   EAX = distance to the wall (Q8), fisheye-
 ;            corrected, at least 1
-; Registers: EAX (EBX, ECX, EDX, ESI, EDI saved by USES)
+;            EDX = hitSide (0 = hit an X gridline,
+;                           1 = hit a Y gridline)
+; Registers: EAX, EDX (EBX, ECX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-CastRay PROC USES ebx ecx edx esi edi, rayAngle:DWORD
+CastRay PROC USES ebx ecx esi edi, rayAngle:DWORD
     LOCAL mapX:SDWORD, mapY:SDWORD          ; the cell the ray is in now
     LOCAL stepX:SDWORD, stepY:SDWORD        ; +1 or -1 per axis
     LOCAL deltaX:SDWORD, deltaY:SDWORD      ; ray length to cross one cell, per axis
@@ -826,8 +842,75 @@ HaveRayDist:
     jge  DistOK                             ; yes
     mov  eax, 1                             ; no: use 1
 DistOK:
-    ret                                     ; back to caller (distance in EAX)
+    mov  edx, hitSide                       ; EDX = which kind of gridline we hit
+    ret                                     ; back to caller (EAX = distance, EDX = side)
 CastRay ENDP
+
+;-------------------------------------------------------------
+; GetWallChar
+; Purpose:   Pick the wall block character for a distance.
+;            Closer = more solid. Y-side walls use one level
+;            lighter so corners and edges show up.
+;            level: 0 = 219, 1 = 178, 2 = 177, 3 = 176
+; Receives:  distance = wall distance (Q8)
+;            side     = hitSide from CastRay (0 or 1)
+; Returns:   EAX = block character (in AL)
+; Registers: EAX only
+;-------------------------------------------------------------
+GetWallChar PROC, distance:DWORD, side:DWORD
+    mov  eax, distance                      ; EAX = distance
+    cmp  eax, shadeDist1                    ; under 2 cells?
+    jb   Level0                             ; yes
+    cmp  eax, shadeDist2                    ; under 4 cells?
+    jb   Level1                             ; yes
+    cmp  eax, shadeDist3                    ; under 8 cells?
+    jb   Level2                             ; yes
+    mov  eax, 3                             ; far: level 3
+    jmp  AddSide                            ; go apply side shading
+Level0:
+    mov  eax, 0                             ; level 0
+    jmp  AddSide                            ; go apply side shading
+Level1:
+    mov  eax, 1                             ; level 1
+    jmp  AddSide                            ; go apply side shading
+Level2:
+    mov  eax, 2                             ; level 2
+AddSide:
+    add  eax, side                          ; Y-side: one level lighter (+1)
+    cmp  eax, 3                             ; past the lightest level?
+    jbe  HaveLevel                          ; no
+    mov  eax, 3                             ; yes: stay at the lightest
+HaveLevel:
+    movzx eax, wallShades[eax]              ; EAX = block character for this level
+    ret                                     ; back to caller
+GetWallChar ENDP
+
+;-------------------------------------------------------------
+; GetFloorChar
+; Purpose:   Pick the floor character for a screen row.
+;            Rows near the bottom are close to the player and
+;            get a dense character; higher rows are further.
+;            level = (rows from bottom) / 3, max 3
+;            '#' (bottom 3 rows), 'x', '-', '.'
+; Receives:  ECX = screen row (0..23)
+; Returns:   EAX = floor character (in AL)
+; Registers: EAX (EDX saved by USES)
+;-------------------------------------------------------------
+GetFloorChar PROC USES edx
+    mov  eax, SCREEN_H - 1                  ; EAX = 23 (bottom row)
+    sub  eax, ecx                           ; EAX = rows from the bottom (0 = bottom)
+    mov  edx, 0                             ; clear EDX before DIV
+    push ecx                                ; keep the row number safe
+    mov  ecx, FLOOR_BAND                    ; divide by 3
+    div  ecx                                ; EAX = level
+    pop  ecx                                ; ECX = row number again
+    cmp  eax, 3                             ; past the last level?
+    jbe  FloorLevelOK                       ; no
+    mov  eax, 3                             ; yes: use the last level
+FloorLevelOK:
+    movzx eax, floorShades[eax]             ; EAX = floor character
+    ret                                     ; back to caller
+GetFloorChar ENDP
 
 ;-------------------------------------------------------------
 ; GetWallHeight
@@ -853,14 +936,15 @@ GetWallHeight ENDP
 ;-------------------------------------------------------------
 ; DrawColumn
 ; Purpose:   Fill one screen column, top to bottom:
-;            ' ' (ceiling), '#' (wall), '.' (floor).
+;            ' ' (ceiling), wallChar (wall), shaded floor.
 ;            The wall is centred vertically.
 ; Receives:  column = screen x (0..79)
 ;            wallHeight = wall size in rows (0..24)
+;            wallChar = character to draw the wall with
 ; Returns:   nothing (frameBuffer changed)
 ; Registers: none (EAX, EBX, ECX, EDX, EDI saved by USES)
 ;-------------------------------------------------------------
-DrawColumn PROC USES eax ebx ecx edx edi, column:DWORD, wallHeight:DWORD
+DrawColumn PROC USES eax ebx ecx edx edi, column:DWORD, wallHeight:DWORD, wallChar:DWORD
     mov  ebx, SCREEN_H                      ; EBX = 24
     sub  ebx, wallHeight                    ; rows not used by the wall
     shr  ebx, 1                             ; half above: EBX = first wall row
@@ -873,10 +957,10 @@ ColumnRow:
     mov  al, ' '                            ; assume ceiling
     cmp  ecx, ebx                           ; above the wall?
     jb   PutChar                            ; yes: ceiling
-    mov  al, '#'                            ; assume wall
+    mov  eax, wallChar                      ; assume wall (shaded block in AL)
     cmp  ecx, edx                           ; still inside the wall?
     jb   PutChar                            ; yes: wall
-    mov  al, '.'                            ; otherwise floor
+    call GetFloorChar                       ; otherwise floor: AL = shade for row ECX
 PutChar:
     mov  [edi], al                          ; write the character
     add  edi, SCREEN_W                      ; down one row (80 bytes)
@@ -905,9 +989,13 @@ ViewColumn:
     add  eax, angle                         ; + player angle
     sub  eax, FOV / 2                       ; - 30: start at the left edge of the view
     call WrapAngle                          ; keep it 0..359
-    INVOKE CastRay, eax                     ; EAX = distance to the wall
+    INVOKE CastRay, eax                     ; EAX = distance, EDX = hitSide
+    push eax                                ; keep the distance for the height
+    INVOKE GetWallChar, eax, edx            ; EAX = shaded wall character
+    mov  ecx, eax                           ; ECX = wall character
+    pop  eax                                ; EAX = distance again
     call GetWallHeight                      ; EAX = wall height in rows
-    INVOKE DrawColumn, ebx, eax             ; draw this column
+    INVOKE DrawColumn, ebx, eax, ecx        ; draw this column
     inc  ebx                                ; next column
     cmp  ebx, SCREEN_W                      ; all 80 columns done?
     jb   ViewColumn                         ; no: next column
