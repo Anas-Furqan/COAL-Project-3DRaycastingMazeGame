@@ -13,6 +13,9 @@ MAP_W    = 16                               ; map width in cells
 MAP_H    = 16                               ; map height in cells
 FOV      = 60                               ; field of view in degrees
 
+; ---------- Win32 function not declared in SmallWin.inc (lives in user32.lib) ----------
+GetAsyncKeyState PROTO, vKey:DWORD          ; AX bit 15 = 1 if the key is held down right now
+
 ; ---------- procedure prototypes ----------
 GetSin      PROTO                           ; EAX = angle in, EAX = sin*256 out
 GetCos      PROTO                           ; EAX = angle in, EAX = cos*256 out
@@ -22,7 +25,12 @@ HideCursor  PROTO                           ; hides the blinking console cursor
 DrawBuffer  PROTO                           ; copies frameBuffer to the console
 GetMoveDelta PROTO                          ; returns EAX = dx, EDX = dy for one step forward
 IsWall      PROTO, testX:SDWORD, testY:SDWORD     ; EAX = 1 if (testX,testY) is inside a wall
+ProbePoint  PROTO, newPos:SDWORD, delta:SDWORD    ; EAX = newPos pushed MARGIN further in move direction
 TryMove     PROTO, moveDX:SDWORD, moveDY:SDWORD   ; moves the player if no wall is in the way
+InitInput   PROTO                           ; gets the console input handle
+KeyDown     PROTO, vKey:DWORD               ; EAX = 1 if key is held down now
+KeyPressed  PROTO, vKey:DWORD, prevPtr:PTR BYTE   ; EAX = 1 only on the frame the key goes down
+GetArrowChar PROTO                          ; AL = '>', 'v', '<' or '^' for the current angle
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
 HandleInput PROTO                           ; reads one key (no waiting) and acts on it
 DrawMinimap PROTO                           ; copies map + 'P' into the frame buffer
@@ -30,7 +38,8 @@ GameLoop    PROTO                           ; main loop of the game
 
 ; ---------- movement settings ----------
 MOVE_SPEED = 32                             ; one step = 32/256 = 1/8 of a cell (Q8)
-TURN_STEP  = 5                              ; degrees turned per A/D key press
+TURN_STEP  = 5                              ; degrees turned per frame while A/D is held
+MARGIN     = 64                             ; keep 64/256 = 1/4 cell away from walls
 
 .data
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
@@ -62,6 +71,9 @@ startTime DWORD 0                           ; time (ms from GetMSeconds) when th
 ; ---------- game state flags ----------
 showMinimap BYTE 1                          ; 1 = minimap visible, 0 = hidden (M toggles)
 quitFlag    BYTE 0                          ; becomes 1 when the player presses Q
+mWasDown    BYTE 0                          ; 1 if M was held last frame (for single press)
+qWasDown    BYTE 0                          ; 1 if Q was held last frame (for single press)
+inputHandle DWORD ?                         ; console input handle (set by InitInput)
 
 ; ---------- sine table: sinTable[d] = round(sin(d degrees) * 256) ----------
 sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
@@ -133,7 +145,8 @@ pressKey   BYTE "Press any key to start...", 0       ; prompt
 ;-------------------------------------------------------------
 main PROC
     INVOKE HideCursor                       ; get console handle and hide the cursor
-    INVOKE TitleScreen                      ; show the title screen and wait for a key
+    INVOKE InitInput                        ; get console input handle (for flushing keys)
+    INVOKE TitleScreen                     ; show the title screen and wait for a key
     call   Clrscr                           ; wipe the title text off the screen
     INVOKE GameLoop                         ; play until quitFlag is set
     INVOKE ExitProcess, 0                   ; end the program with exit code 0
@@ -341,10 +354,32 @@ WallDone:
 IsWall ENDP
 
 ;-------------------------------------------------------------
+; ProbePoint
+; Purpose:   Give the point to test for walls: the new position
+;            plus MARGIN further in the direction of movement.
+; Receives:  newPos = new X or Y (Q8), delta = movement (+ or -)
+; Returns:   EAX = newPos + MARGIN (delta > 0) or
+;                  newPos - MARGIN (delta < 0)
+; Registers: EAX only
+;-------------------------------------------------------------
+ProbePoint PROC, newPos:SDWORD, delta:SDWORD
+    mov  eax, newPos                        ; EAX = the new position
+    cmp  delta, 0                           ; moving in the negative direction?
+    jl   ProbeNeg                           ; yes
+    add  eax, MARGIN                        ; no: look a bit further ahead (+)
+    jmp  ProbeDone                          ; finished
+ProbeNeg:
+    sub  eax, MARGIN                        ; look a bit further ahead (-)
+ProbeDone:
+    ret                                     ; back to caller
+ProbePoint ENDP
+
+;-------------------------------------------------------------
 ; TryMove
 ; Purpose:   Move the player by (moveDX, moveDY) if no wall is
-;            in the way. X and Y are checked separately so the
-;            player slides along walls. steps++ if it moved.
+;            within MARGIN of the new position. X and Y are
+;            checked separately so the player slides along
+;            walls. steps++ if it moved.
 ; Receives:  moveDX, moveDY = movement in Q8
 ; Returns:   posX, posY, steps updated
 ; Registers: none (EAX, ECX, EDX saved by USES)
@@ -355,7 +390,8 @@ TryMove PROC USES eax ecx edx, moveDX:SDWORD, moveDY:SDWORD
     je   TryY                               ; no: skip the X test
     mov  edx, posX                          ; EDX = current X
     add  edx, moveDX                        ; EDX = new X
-    INVOKE IsWall, edx, posY                ; new X with OLD Y: wall?
+    INVOKE ProbePoint, edx, moveDX          ; EAX = new X + margin ahead
+    INVOKE IsWall, eax, posY                ; that point with OLD Y: wall?
     cmp  eax, 0                             ; 0 means free
     jne  TryY                               ; wall: do not move in X
     mov  posX, edx                          ; free: accept the new X
@@ -365,7 +401,8 @@ TryY:
     je   MoveDone                           ; no: skip the Y test
     mov  edx, posY                          ; EDX = current Y
     add  edx, moveDY                        ; EDX = new Y
-    INVOKE IsWall, posX, edx                ; (maybe new) X with new Y: wall?
+    INVOKE ProbePoint, edx, moveDY          ; EAX = new Y + margin ahead
+    INVOKE IsWall, posX, eax                ; (maybe new) X with that Y: wall?
     cmp  eax, 0                             ; 0 means free
     jne  MoveDone                           ; wall: do not move in Y
     mov  posY, edx                          ; free: accept the new Y
@@ -401,58 +438,149 @@ AngleInRange:
 TurnPlayer ENDP
 
 ;-------------------------------------------------------------
+; InitInput
+; Purpose:   Get the console input handle (used to throw away
+;            waiting key events each frame).
+; Receives:  nothing
+; Returns:   inputHandle is set
+; Registers: none (EAX, ECX, EDX saved by USES)
+;-------------------------------------------------------------
+InitInput PROC USES eax ecx edx
+    INVOKE GetStdHandle, STD_INPUT_HANDLE   ; ask Windows for the console input handle
+    mov  inputHandle, eax                   ; save it
+    ret                                     ; back to caller
+InitInput ENDP
+
+;-------------------------------------------------------------
+; KeyDown
+; Purpose:   Check if a key is being held down right now.
+; Receives:  vKey = virtual key code ('W', 'A', ... are the
+;            same as their uppercase ASCII codes)
+; Returns:   EAX = 1 if held, 0 if not
+; Registers: EAX (ECX, EDX saved by USES)
+;-------------------------------------------------------------
+KeyDown PROC USES ecx edx, vKey:DWORD
+    INVOKE GetAsyncKeyState, vKey           ; AX = key state
+    test ax, 8000h                          ; bit 15 set = key is down
+    jz   KeyIsUp                            ; bit is 0: key is up
+    mov  eax, 1                             ; key is down: return 1
+    jmp  KeyDownDone                        ; finished
+KeyIsUp:
+    mov  eax, 0                             ; key is up: return 0
+KeyDownDone:
+    ret                                     ; back to caller
+KeyDown ENDP
+
+;-------------------------------------------------------------
+; KeyPressed
+; Purpose:   Report a key only on the frame it goes DOWN
+;            (held key = one press, not one per frame).
+; Receives:  vKey    = virtual key code
+;            prevPtr = address of a BYTE holding last frame's
+;                      state (1 = was down); it is updated
+; Returns:   EAX = 1 if the key is down now AND was up before
+; Registers: EAX (ECX, ESI saved by USES)
+;-------------------------------------------------------------
+KeyPressed PROC USES ecx esi, vKey:DWORD, prevPtr:PTR BYTE
+    INVOKE KeyDown, vKey                    ; EAX = 1 if down now
+    mov  esi, prevPtr                       ; ESI = address of the "was down" byte
+    movzx ecx, BYTE PTR [esi]               ; ECX = last frame's state
+    mov  [esi], al                          ; save this frame's state for next time
+    cmp  ecx, 0                             ; was it up last frame?
+    je   PressDone                          ; yes: EAX (0 or 1) is the answer
+    mov  eax, 0                             ; it was already down: not a new press
+PressDone:
+    ret                                     ; back to caller
+KeyPressed ENDP
+
+;-------------------------------------------------------------
 ; HandleInput
-; Purpose:   Read one key without waiting and act on it:
-;            W/S move, A/D turn, M toggles minimap, Q quits.
+; Purpose:   Check the keys every frame. Held keys: A/D turn,
+;            W/S move (they can combine, e.g. W+A). Single
+;            presses: M toggles minimap, Q quits. Old console
+;            key events are thrown away so they don't pile up.
 ; Receives:  nothing
 ; Returns:   posX/posY/angle/showMinimap/quitFlag may change
-; Registers: none (EAX, EBX, EDX saved by USES)
+; Registers: none (EAX, ECX, EDX saved by USES)
 ;-------------------------------------------------------------
-HandleInput PROC USES eax ebx edx
-    call ReadKey                            ; AL = key; ZF = 1 if no key (also changes EBX, EDX)
-    jz   InputDone                          ; no key this frame
-    and  al, 11011111b                      ; clear bit 5: turns 'a'..'z' into 'A'..'Z'
-    cmp  al, 'W'                            ; forward?
-    jne  NotW                               ; no
+HandleInput PROC USES eax ecx edx
+    INVOKE FlushConsoleInputBuffer, inputHandle ; drop waiting key events
+    INVOKE KeyDown, 'A'                     ; A held?
+    cmp  eax, 0                             ; 0 = not held
+    je   CheckD                             ; skip turning left
+    INVOKE TurnPlayer, -TURN_STEP           ; turn left 5 degrees
+CheckD:
+    INVOKE KeyDown, 'D'                     ; D held?
+    cmp  eax, 0                             ; 0 = not held
+    je   CheckW                             ; skip turning right
+    INVOKE TurnPlayer, TURN_STEP            ; turn right 5 degrees
+CheckW:
+    INVOKE KeyDown, 'W'                     ; W held?
+    cmp  eax, 0                             ; 0 = not held
+    je   CheckS                             ; skip moving forward
     call GetMoveDelta                       ; EAX = dx, EDX = dy
     INVOKE TryMove, eax, edx                ; move forward if possible
-    jmp  InputDone                          ; finished
-NotW:
-    cmp  al, 'S'                            ; backward?
-    jne  NotS                               ; no
+CheckS:
+    INVOKE KeyDown, 'S'                     ; S held?
+    cmp  eax, 0                             ; 0 = not held
+    je   CheckM                             ; skip moving back
     call GetMoveDelta                       ; EAX = dx, EDX = dy
     neg  eax                                ; reverse X direction
     neg  edx                                ; reverse Y direction
     INVOKE TryMove, eax, edx                ; move backward if possible
-    jmp  InputDone                          ; finished
-NotS:
-    cmp  al, 'A'                            ; turn left?
-    jne  NotA                               ; no
-    INVOKE TurnPlayer, -TURN_STEP           ; angle - 5
-    jmp  InputDone                          ; finished
-NotA:
-    cmp  al, 'D'                            ; turn right?
-    jne  NotD                               ; no
-    INVOKE TurnPlayer, TURN_STEP            ; angle + 5
-    jmp  InputDone                          ; finished
-NotD:
-    cmp  al, 'M'                            ; minimap toggle?
-    jne  NotM                               ; no
+CheckM:
+    INVOKE KeyPressed, 'M', ADDR mWasDown   ; M newly pressed?
+    cmp  eax, 0                             ; 0 = no new press
+    je   CheckQ                             ; skip the toggle
     xor  showMinimap, 1                     ; 1 -> 0 or 0 -> 1
-    jmp  InputDone                          ; finished
-NotM:
-    cmp  al, 'Q'                            ; quit?
-    jne  InputDone                          ; no: ignore this key
+CheckQ:
+    INVOKE KeyPressed, 'Q', ADDR qWasDown   ; Q newly pressed?
+    cmp  eax, 0                             ; 0 = no new press
+    je   InputDone                          ; keep playing
     mov  quitFlag, 1                        ; tell the game loop to stop
 InputDone:
     ret                                     ; back to caller
 HandleInput ENDP
 
 ;-------------------------------------------------------------
+; GetArrowChar
+; Purpose:   Pick the minimap arrow for the player's angle,
+;            using 90-degree ranges centred on each direction.
+;            315..44 -> '>'   45..134 -> 'v'
+;            135..224 -> '<'  225..314 -> '^'
+; Receives:  angle (global, 0..359)
+; Returns:   EAX = arrow character (in AL)
+; Registers: EAX only
+;-------------------------------------------------------------
+GetArrowChar PROC
+    mov  eax, angle                         ; EAX = current angle
+    cmp  eax, 45                            ; below 45?
+    jb   ArrowRight                         ; yes: facing east
+    cmp  eax, 135                           ; below 135?
+    jb   ArrowDown                          ; yes: facing south (screen down)
+    cmp  eax, 225                           ; below 225?
+    jb   ArrowLeft                          ; yes: facing west
+    cmp  eax, 315                           ; below 315?
+    jb   ArrowUp                            ; yes: facing north (screen up)
+ArrowRight:
+    mov  eax, '>'                           ; 315..359 or 0..44
+    ret                                     ; back to caller
+ArrowDown:
+    mov  eax, 'v'                           ; 45..134
+    ret                                     ; back to caller
+ArrowLeft:
+    mov  eax, '<'                           ; 135..224
+    ret                                     ; back to caller
+ArrowUp:
+    mov  eax, '^'                           ; 225..314
+    ret                                     ; back to caller
+GetArrowChar ENDP
+
+;-------------------------------------------------------------
 ; DrawMinimap
 ; Purpose:   If showMinimap = 1, copy the 16x16 map into the
-;            top-left of frameBuffer and put 'P' on the
-;            player's cell.
+;            top-left of frameBuffer and put a direction arrow
+;            on the player's cell.
 ; Receives:  nothing (uses gameMap, posX, posY)
 ; Returns:   nothing
 ; Registers: none (EAX, ECX, EDX, ESI, EDI saved by USES)
@@ -470,13 +598,14 @@ CopyRow:
     add  edi, SCREEN_W - MAP_W              ; skip the other 64 screen columns to the next row
     dec  edx                                ; one row done
     jnz  CopyRow                            ; more rows left: copy the next
-    mov  eax, posY                          ; EAX = Y in Q8
-    sar  eax, 8                             ; EAX = player row
-    imul eax, SCREEN_W                      ; EAX = row * 80 (start of that screen row)
+    mov  ecx, posY                          ; ECX = Y in Q8
+    sar  ecx, 8                             ; ECX = player row
+    imul ecx, SCREEN_W                      ; ECX = row * 80 (start of that screen row)
     mov  edx, posX                          ; EDX = X in Q8
     sar  edx, 8                             ; EDX = player column
-    add  eax, edx                           ; EAX = row*80 + col
-    mov  frameBuffer[eax], 'P'              ; mark the player
+    add  ecx, edx                           ; ECX = row*80 + col
+    call GetArrowChar                       ; AL = arrow for the facing direction
+    mov  frameBuffer[ecx], al               ; draw the arrow on the player's cell
 MapDone:
     ret                                     ; back to caller
 DrawMinimap ENDP
