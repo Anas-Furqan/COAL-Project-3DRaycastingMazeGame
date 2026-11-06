@@ -251,19 +251,30 @@ HideCursor ENDP
 
 ;-------------------------------------------------------------
 ; DrawBuffer
-; Purpose:   Copy the whole frameBuffer to the console at
-;            (0,0) with ONE Windows call, so there is no flicker.
+; Purpose:   Copy the frameBuffer to the console one row at a
+;            time: 24 calls, each writing 80 chars to (0,row).
+;            Nothing is cleared, only overwritten, so no flicker,
+;            and each row starts at column 0 at any console width.
 ; Receives:  nothing (uses frameBuffer and consoleHandle)
 ; Returns:   nothing
-; Registers: none (EAX, ECX, EDX saved by USES)
+; Registers: none (EAX, EBX, ECX, EDX, ESI saved by USES)
 ;-------------------------------------------------------------
-DrawBuffer PROC USES eax ecx edx
+DrawBuffer PROC USES eax ebx ecx edx esi
+    mov  esi, OFFSET frameBuffer            ; ESI = start of row 0 in the buffer
+    mov  ebx, 0                             ; EBX = row number, start at 0
+RowLoop:
+    mov  drawPos.X, 0                       ; screen column 0
+    mov  drawPos.Y, bx                      ; screen row = current row number
     INVOKE WriteConsoleOutputCharacter, ; write characters straight into the console
            consoleHandle,               ; where to write
-           ADDR frameBuffer,            ; what to write
-           SCREEN_W * SCREEN_H,         ; how many characters (1920)
-           drawPos,                     ; start at column 0, row 0
+           esi,                         ; what to write: frameBuffer + row*80
+           SCREEN_W,                    ; how many characters (80, one row)
+           drawPos,                     ; start at (0, row)
            ADDR charsWritten            ; Windows puts the count here
+    add  esi, SCREEN_W                      ; move ESI to the start of the next row
+    inc  ebx                                ; next row number
+    cmp  ebx, SCREEN_H                      ; done all 24 rows?
+    jb   RowLoop                            ; no: write the next row
     ret                                     ; back to caller
 DrawBuffer ENDP
 
