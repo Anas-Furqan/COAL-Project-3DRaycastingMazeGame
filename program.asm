@@ -31,6 +31,14 @@ InitInput   PROTO                           ; gets the console input handle
 KeyDown     PROTO, vKey:DWORD               ; EAX = 1 if key is held down now
 KeyPressed  PROTO, vKey:DWORD, prevPtr:PTR BYTE   ; EAX = 1 only on the frame the key goes down
 GetArrowChar PROTO                          ; AL = '>', 'v', '<' or '^' for the current angle
+WrapAngle   PROTO                           ; EAX = angle in, EAX = same angle wrapped to 0..359
+AnyKeyDown  PROTO                           ; EAX = 1 if any keyboard key is held
+WaitKeysReleased PROTO                      ; waits until keys are let go, sets mWasDown/qWasDown
+SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
+CastRay     PROTO, rayAngle:DWORD           ; EAX = corrected distance to the first wall (Q8)
+GetWallHeight PROTO                         ; EAX = distance in, EAX = wall height in rows
+DrawColumn  PROTO, column:DWORD, wallHeight:DWORD ; draws one screen column (sky, wall, floor)
+RenderView  PROTO                           ; casts 80 rays and draws the 3D view
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
 HandleInput PROTO                           ; reads one key (no waiting) and acts on it
 DrawMinimap PROTO                           ; copies map + 'P' into the frame buffer
@@ -40,6 +48,10 @@ GameLoop    PROTO                           ; main loop of the game
 MOVE_SPEED = 32                             ; one step = 32/256 = 1/8 of a cell (Q8)
 TURN_STEP  = 5                              ; degrees turned per frame while A/D is held
 MARGIN     = 64                             ; keep 64/256 = 1/4 cell away from walls
+
+; ---------- raycasting settings ----------
+BIG_DIST   = 1000000                        ; "infinite" distance, used when a ray never crosses an axis
+KEY_WAIT_TRIES = 200                        ; max 200 x 10 ms = 2 s waiting for keys to be released
 
 .data
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
@@ -146,7 +158,8 @@ pressKey   BYTE "Press any key to start...", 0       ; prompt
 main PROC
     INVOKE HideCursor                       ; get console handle and hide the cursor
     INVOKE InitInput                        ; get console input handle (for flushing keys)
-    INVOKE TitleScreen                     ; show the title screen and wait for a key
+    INVOKE TitleScreen                      ; show the title screen and wait for a key
+    INVOKE WaitKeysReleased                 ; make sure the closing key can't trigger M or Q
     call   Clrscr                           ; wipe the title text off the screen
     INVOKE GameLoop                         ; play until quitFlag is set
     INVOKE ExitProcess, 0                   ; end the program with exit code 0
@@ -425,17 +438,80 @@ TryMove ENDP
 TurnPlayer PROC USES eax, turnAmount:SDWORD
     mov  eax, angle                         ; EAX = current angle
     add  eax, turnAmount                    ; turn
-    cmp  eax, 0                             ; went below 0? (signed compare)
-    jge  NotNegative                        ; no
-    add  eax, 360                           ; yes: e.g. -5 becomes 355
-NotNegative:
-    cmp  eax, 360                           ; reached 360 or more?
-    jl   AngleInRange                       ; no
-    sub  eax, 360                           ; yes: e.g. 360 becomes 0
-AngleInRange:
+    call WrapAngle                          ; keep it in 0..359
     mov  angle, eax                         ; save the new angle
     ret                                     ; back to caller
 TurnPlayer ENDP
+
+;-------------------------------------------------------------
+; WrapAngle
+; Purpose:   Bring an angle back into 0..359.
+; Receives:  EAX = angle, between -360 and 719
+; Returns:   EAX = same direction, now 0..359
+; Registers: EAX only
+;-------------------------------------------------------------
+WrapAngle PROC
+    cmp  eax, 0                             ; below 0? (signed compare)
+    jge  WrapNotNegative                    ; no
+    add  eax, 360                           ; yes: e.g. -5 becomes 355
+WrapNotNegative:
+    cmp  eax, 360                           ; 360 or more?
+    jl   WrapDone                           ; no: already fine
+    sub  eax, 360                           ; yes: e.g. 365 becomes 5
+WrapDone:
+    ret                                     ; back to caller
+WrapAngle ENDP
+
+;-------------------------------------------------------------
+; AnyKeyDown
+; Purpose:   Check every keyboard key code (8..254) to see if
+;            any key is still held down.
+; Receives:  nothing
+; Returns:   EAX = 1 if some key is held, 0 if none
+; Registers: EAX (ECX saved by USES)
+;-------------------------------------------------------------
+AnyKeyDown PROC USES ecx
+    mov  ecx, 8                             ; codes 1..7 are mouse buttons, start at 8
+CheckNextKey:
+    INVOKE KeyDown, ecx                     ; EAX = 1 if this key is held
+    cmp  eax, 0                             ; held?
+    jne  FoundKey                           ; yes: stop looking
+    inc  ecx                                ; next key code
+    cmp  ecx, 255                           ; checked all of them?
+    jb   CheckNextKey                       ; no: keep checking
+    mov  eax, 0                             ; no key is held
+    ret                                     ; back to caller
+FoundKey:
+    mov  eax, 1                             ; a key is held
+    ret                                     ; back to caller
+AnyKeyDown ENDP
+
+;-------------------------------------------------------------
+; WaitKeysReleased
+; Purpose:   After the title screen, wait (max 2 s) until no
+;            key is held, then set mWasDown/qWasDown from the
+;            real key state. So the key that closed the title
+;            screen can never count as an M or Q press.
+; Receives:  nothing
+; Returns:   mWasDown, qWasDown set
+; Registers: none (EAX, ECX saved by USES)
+;-------------------------------------------------------------
+WaitKeysReleased PROC USES eax ecx
+    mov  ecx, KEY_WAIT_TRIES                ; give up after this many tries
+WaitLoop:
+    call AnyKeyDown                         ; EAX = 1 if something is still held
+    cmp  eax, 0                             ; all keys up?
+    je   KeysReleased                       ; yes: done waiting
+    mov  eax, 10                            ; 10 milliseconds
+    call Delay                              ; wait a little and look again
+    loop WaitLoop                           ; ECX--, try again until ECX = 0
+KeysReleased:
+    INVOKE KeyDown, 'M'                     ; is M held right now?
+    mov  mWasDown, al                       ; if yes, the game won't see it as a new press
+    INVOKE KeyDown, 'Q'                     ; is Q held right now?
+    mov  qWasDown, al                       ; same for Q
+    ret                                     ; back to caller
+WaitKeysReleased ENDP
 
 ;-------------------------------------------------------------
 ; InitInput
@@ -611,9 +687,238 @@ MapDone:
 DrawMinimap ENDP
 
 ;-------------------------------------------------------------
+; SetupAxis
+; Purpose:   DDA setup for ONE axis (call once for X, once
+;            for Y). All values are Q8.
+;            deltaDist = ray length to cross one whole cell
+;                        on this axis = 256*256 / |dir|
+;            step      = +1 or -1 (which way we move in cells)
+;            sideDist  = ray length from the player to the
+;                        FIRST grid line on this axis
+; Receives:  axisPos = player position on this axis (Q8)
+;            axisDir = ray direction on this axis (cos or
+;                      sin value, -256..256)
+; Returns:   EAX = deltaDist, EBX = sideDist, ECX = step
+; Registers: EAX, EBX, ECX (EDX, ESI saved by USES)
+;-------------------------------------------------------------
+SetupAxis PROC USES edx esi, axisPos:SDWORD, axisDir:SDWORD
+    mov  esi, axisDir                       ; ESI = direction on this axis
+    cmp  esi, 0                             ; ray exactly parallel to this axis?
+    jne  DirNotZero                         ; no: normal case
+    mov  eax, BIG_DIST                      ; never crosses a line: "infinite" deltaDist
+    mov  ebx, BIG_DIST                      ; and the first line is "infinitely" far
+    mov  ecx, 1                             ; step not used, any value is fine
+    ret                                     ; back to caller (no divide by zero)
+DirNotZero:
+    mov  ecx, 1                             ; assume moving + (right / down)
+    cmp  esi, 0                             ; is the direction negative?
+    jg   DirPositive                        ; no: keep step = +1
+    neg  esi                                ; ESI = |dir|
+    mov  ecx, -1                            ; moving - (left / up)
+DirPositive:
+    mov  eax, 65536                         ; 256 * 256 (1.0 in Q8, divided by a Q8 number)
+    mov  edx, 0                             ; clear EDX before DIV
+    div  esi                                ; EAX = deltaDist = 65536 / |dir|
+    mov  edx, axisPos                       ; EDX = position in Q8
+    and  edx, 255                           ; EDX = how far into the current cell (0..255)
+    cmp  ecx, 1                             ; moving + ?
+    jne  HaveGap                            ; no: gap back to the cell's start = EDX
+    neg  edx                                ; moving +: gap forward = 256 - EDX
+    add  edx, 256                           ; EDX = gap to the next grid line (Q8)
+HaveGap:
+    mov  ebx, eax                           ; EBX = deltaDist
+    imul ebx, edx                           ; EBX = deltaDist * gap (max 16384*256, no overflow)
+    sar  ebx, 8                             ; /256 back to Q8 -> sideDist
+    ret                                     ; back to caller
+SetupAxis ENDP
+
+;-------------------------------------------------------------
+; CastRay
+; Purpose:   Send one ray from the player and find the
+;            distance to the first wall, using DDA (jump from
+;            grid line to grid line, one cell at a time).
+; Receives:  rayAngle = ray direction in degrees (0..359)
+; Returns:   EAX = distance to the wall (Q8), fisheye-
+;            corrected, at least 1
+; Registers: EAX (EBX, ECX, EDX, ESI, EDI saved by USES)
+;-------------------------------------------------------------
+CastRay PROC USES ebx ecx edx esi edi, rayAngle:DWORD
+    LOCAL mapX:SDWORD, mapY:SDWORD          ; the cell the ray is in now
+    LOCAL stepX:SDWORD, stepY:SDWORD        ; +1 or -1 per axis
+    LOCAL deltaX:SDWORD, deltaY:SDWORD      ; ray length to cross one cell, per axis
+    LOCAL sideX:SDWORD, sideY:SDWORD        ; ray length to the next X / Y grid line
+    LOCAL hitSide:DWORD                     ; 0 = last step was in X, 1 = in Y
+
+    ; ----- block 1: ray direction from the tables -----
+    mov  eax, rayAngle                      ; EAX = ray angle
+    call GetCos                             ; EAX = cos * 256
+    mov  edi, eax                           ; EDI = dirX
+    mov  eax, rayAngle                      ; EAX = ray angle
+    call GetSin                             ; EAX = sin * 256
+    mov  esi, eax                           ; ESI = dirY
+
+    ; ----- block 2: starting cell and DDA setup per axis -----
+    mov  eax, posX                          ; EAX = player X (Q8)
+    sar  eax, 8                             ; whole cells
+    mov  mapX, eax                          ; start cell column
+    mov  eax, posY                          ; EAX = player Y (Q8)
+    sar  eax, 8                             ; whole cells
+    mov  mapY, eax                          ; start cell row
+    INVOKE SetupAxis, posX, edi             ; X axis: EAX = delta, EBX = side, ECX = step
+    mov  deltaX, eax                        ; save deltaDist X
+    mov  sideX, ebx                         ; save sideDist X
+    mov  stepX, ecx                         ; save step X
+    INVOKE SetupAxis, posY, esi             ; Y axis: same outputs
+    mov  deltaY, eax                        ; save deltaDist Y
+    mov  sideY, ebx                         ; save sideDist Y
+    mov  stepY, ecx                         ; save step Y
+
+    ; ----- block 3: step cell by cell until a wall -----
+    ; (the map has walls all round, so this always ends)
+DDALoop:
+    mov  eax, sideX                         ; EAX = distance to next X line
+    cmp  eax, sideY                         ; is the X line closer than the Y line?
+    jge  StepInY                            ; no: the Y line comes first
+    mov  eax, deltaX                        ; yes: cross the X line
+    add  sideX, eax                         ; next X line is one deltaX further
+    mov  eax, stepX                         ; +1 or -1
+    add  mapX, eax                          ; move one cell left/right
+    mov  hitSide, 0                         ; we crossed an X line
+    jmp  CheckCell                          ; look at the new cell
+StepInY:
+    mov  eax, deltaY                        ; cross the Y line
+    add  sideY, eax                         ; next Y line is one deltaY further
+    mov  eax, stepY                         ; +1 or -1
+    add  mapY, eax                          ; move one cell up/down
+    mov  hitSide, 1                         ; we crossed a Y line
+CheckCell:
+    mov  eax, mapY                          ; EAX = row
+    shl  eax, 4                             ; row * 16
+    add  eax, mapX                          ; row*16 + col
+    cmp  gameMap[eax], '#'                  ; is this cell a wall?
+    jne  DDALoop                            ; no: keep stepping
+
+    ; ----- block 4: distance along the ray to the wall -----
+    ; sideX/sideY is already one cell past the hit line,
+    ; so take one delta back off.
+    cmp  hitSide, 0                         ; hit on an X line?
+    jne  HitOnY                             ; no: Y line
+    mov  eax, sideX                         ; distance to the X line after the wall
+    sub  eax, deltaX                        ; minus one cell = distance to the wall
+    jmp  HaveRayDist                        ; done
+HitOnY:
+    mov  eax, sideY                         ; distance to the Y line after the wall
+    sub  eax, deltaY                        ; minus one cell = distance to the wall
+HaveRayDist:
+    mov  ebx, eax                           ; EBX = distance along the ray (Q8)
+
+    ; ----- block 5: fisheye correction -----
+    ; distance straight ahead = ray distance * cos(rayAngle - angle)
+    mov  eax, rayAngle                      ; EAX = ray angle
+    sub  eax, angle                         ; angle between this ray and the view centre
+    call WrapAngle                          ; keep it 0..359 for the table
+    call GetCos                             ; EAX = cos(difference) * 256
+    imul eax, ebx                           ; EAX = cos * dist (max ~256*6000, no overflow)
+    sar  eax, 8                             ; /256 back to Q8
+
+    ; ----- block 6: never return 0 or less (we divide by it later) -----
+    cmp  eax, 1                             ; at least 1?
+    jge  DistOK                             ; yes
+    mov  eax, 1                             ; no: use 1
+DistOK:
+    ret                                     ; back to caller (distance in EAX)
+CastRay ENDP
+
+;-------------------------------------------------------------
+; GetWallHeight
+; Purpose:   Turn a distance into a wall height on screen.
+;            height = (SCREEN_H * 256) / distance, max SCREEN_H
+;            (1 cell away = 256 -> full 24 rows).
+; Receives:  EAX = distance (Q8, at least 1)
+; Returns:   EAX = wall height in rows (0..24)
+; Registers: EAX (ECX, EDX saved by USES)
+;-------------------------------------------------------------
+GetWallHeight PROC USES ecx edx
+    mov  ecx, eax                           ; ECX = distance
+    mov  eax, SCREEN_H * 256                ; EAX = 6144
+    mov  edx, 0                             ; clear EDX before DIV
+    div  ecx                                ; EAX = 6144 / distance
+    cmp  eax, SCREEN_H                      ; taller than the screen?
+    jbe  HeightOK                           ; no
+    mov  eax, SCREEN_H                      ; yes: limit to 24 rows
+HeightOK:
+    ret                                     ; back to caller
+GetWallHeight ENDP
+
+;-------------------------------------------------------------
+; DrawColumn
+; Purpose:   Fill one screen column, top to bottom:
+;            ' ' (ceiling), '#' (wall), '.' (floor).
+;            The wall is centred vertically.
+; Receives:  column = screen x (0..79)
+;            wallHeight = wall size in rows (0..24)
+; Returns:   nothing (frameBuffer changed)
+; Registers: none (EAX, EBX, ECX, EDX, EDI saved by USES)
+;-------------------------------------------------------------
+DrawColumn PROC USES eax ebx ecx edx edi, column:DWORD, wallHeight:DWORD
+    mov  ebx, SCREEN_H                      ; EBX = 24
+    sub  ebx, wallHeight                    ; rows not used by the wall
+    shr  ebx, 1                             ; half above: EBX = first wall row
+    mov  edx, ebx                           ; EDX = first wall row
+    add  edx, wallHeight                    ; EDX = first floor row
+    mov  edi, OFFSET frameBuffer            ; EDI = row 0 of the buffer
+    add  edi, column                        ; move to this column
+    mov  ecx, 0                             ; ECX = row, start at 0
+ColumnRow:
+    mov  al, ' '                            ; assume ceiling
+    cmp  ecx, ebx                           ; above the wall?
+    jb   PutChar                            ; yes: ceiling
+    mov  al, '#'                            ; assume wall
+    cmp  ecx, edx                           ; still inside the wall?
+    jb   PutChar                            ; yes: wall
+    mov  al, '.'                            ; otherwise floor
+PutChar:
+    mov  [edi], al                          ; write the character
+    add  edi, SCREEN_W                      ; down one row (80 bytes)
+    inc  ecx                                ; next row number
+    cmp  ecx, SCREEN_H                      ; all 24 rows done?
+    jb   ColumnRow                          ; no: next row
+    ret                                     ; back to caller
+DrawColumn ENDP
+
+;-------------------------------------------------------------
+; RenderView
+; Purpose:   Draw the 3D view: one ray per screen column.
+;            rayAngle = angle - FOV/2 + x*FOV/SCREEN_W
+; Receives:  nothing (uses angle, posX, posY)
+; Returns:   nothing (frameBuffer filled)
+; Registers: none (EAX, EBX, ECX, EDX saved by USES)
+;-------------------------------------------------------------
+RenderView PROC USES eax ebx ecx edx
+    mov  ebx, 0                             ; EBX = column x, start at 0
+ViewColumn:
+    mov  eax, ebx                           ; EAX = x
+    imul eax, FOV                           ; EAX = x * 60
+    mov  edx, 0                             ; clear EDX before DIV (x*60 is positive)
+    mov  ecx, SCREEN_W                      ; divide by 80
+    div  ecx                                ; EAX = x * 60 / 80 (0..59 degrees)
+    add  eax, angle                         ; + player angle
+    sub  eax, FOV / 2                       ; - 30: start at the left edge of the view
+    call WrapAngle                          ; keep it 0..359
+    INVOKE CastRay, eax                     ; EAX = distance to the wall
+    call GetWallHeight                      ; EAX = wall height in rows
+    INVOKE DrawColumn, ebx, eax             ; draw this column
+    inc  ebx                                ; next column
+    cmp  ebx, SCREEN_W                      ; all 80 columns done?
+    jb   ViewColumn                         ; no: next column
+    ret                                     ; back to caller
+RenderView ENDP
+
+;-------------------------------------------------------------
 ; GameLoop
 ; Purpose:   Run frames until the player presses Q:
-;            input -> clear -> minimap -> draw -> wait 30 ms.
+;            input -> clear -> 3D view -> minimap -> draw ->
+;            wait 30 ms.
 ; Receives:  nothing
 ; Returns:   nothing
 ; Registers: none (EAX saved by USES)
@@ -624,7 +929,8 @@ FrameLoop:
     cmp  quitFlag, 1                        ; did the player press Q?
     je   LoopDone                           ; yes: leave the loop
     call ClearBuffer                        ; blank frame
-    call DrawMinimap                        ; map + player into the buffer
+    call RenderView                         ; 3D walls into the buffer
+    call DrawMinimap                        ; map + player on top (only if switched on)
     call DrawBuffer                         ; show the frame on screen
     mov  eax, 30                            ; 30 milliseconds
     call Delay                              ; wait before the next frame
