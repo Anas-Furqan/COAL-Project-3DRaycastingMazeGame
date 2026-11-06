@@ -17,6 +17,11 @@ FOV      = 60                               ; field of view in degrees
 GetSin      PROTO                           ; EAX = angle in, EAX = sin*256 out
 GetCos      PROTO                           ; EAX = angle in, EAX = cos*256 out
 TitleScreen PROTO                           ; shows the title screen
+ClearBuffer PROTO                           ; fills frameBuffer with spaces
+HideCursor  PROTO                           ; hides the blinking console cursor
+DrawBuffer  PROTO                           ; copies frameBuffer to the console
+DrawBar     PROTO                           ; (test) EAX = column, draws a '#' bar
+TestBarLoop PROTO                           ; (test) moving bar animation
 
 .data
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
@@ -83,6 +88,13 @@ sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
          SDWORD  -88, -83, -79, -75, -71, -66, -62, -58, -53, -49   ; 340-349 deg
          SDWORD  -44, -40, -36, -31, -27, -22, -18, -13,  -9,  -4   ; 350-359 deg
 
+; ---------- screen drawing data ----------
+frameBuffer   BYTE SCREEN_W * SCREEN_H DUP(' ')   ; 80x24 = 1920 chars, cell (row,col) at row*80 + col
+consoleHandle DWORD ?                       ; handle of the console output (set by HideCursor)
+cursorInfo    CONSOLE_CURSOR_INFO <100, 0>  ; cursor size 100%, bVisible = 0 (hidden)
+drawPos       COORD <0, 0>                  ; screen position (0,0) where drawing starts
+charsWritten  DWORD ?                       ; Windows stores how many chars it wrote here
+
 ; ---------- title screen text ----------
 titleLine1 BYTE "==============================", 0   ; top border
 titleLine2 BYTE "           WOLF-86            ", 0   ; game name
@@ -100,13 +112,17 @@ pressKey   BYTE "Press any key to start...", 0       ; prompt
 .code
 ;-------------------------------------------------------------
 ; main
-; Purpose:   Program entry. Shows the title screen, then exits.
+; Purpose:   Program entry. Shows the title screen, runs the
+;            temporary moving-bar test, then exits.
 ; Receives:  nothing
 ; Returns:   nothing (ends the program)
 ; Registers: none kept (program ends)
 ;-------------------------------------------------------------
 main PROC
+    INVOKE HideCursor                       ; get console handle and hide the cursor
     INVOKE TitleScreen                      ; show the title screen and wait for a key
+    call   Clrscr                           ; wipe the title text off the screen
+    INVOKE TestBarLoop                      ; TEMPORARY: test the frame buffer drawing
     INVOKE ExitProcess, 0                   ; end the program with exit code 0
 main ENDP
 
@@ -200,5 +216,109 @@ TitleScreen PROC USES eax edx
     call ReadChar                           ; wait for a key (key code goes to AL, ignored)
     ret                                     ; back to caller
 TitleScreen ENDP
+
+;-------------------------------------------------------------
+; ClearBuffer
+; Purpose:   Fill the whole frameBuffer with spaces.
+; Receives:  nothing
+; Returns:   nothing
+; Registers: none (EAX, ECX, EDI saved by USES)
+;-------------------------------------------------------------
+ClearBuffer PROC USES eax ecx edi
+    cld                                     ; direction flag = 0, so EDI moves forward
+    mov  al, ' '                            ; AL = the byte to store (a space)
+    mov  ecx, SCREEN_W * SCREEN_H           ; ECX = how many bytes (1920)
+    mov  edi, OFFSET frameBuffer            ; EDI = start of the buffer
+    rep  stosb                              ; store AL at [EDI], EDI++, repeat ECX times
+    ret                                     ; back to caller
+ClearBuffer ENDP
+
+;-------------------------------------------------------------
+; HideCursor
+; Purpose:   Get the console output handle (saved in
+;            consoleHandle) and hide the blinking cursor.
+;            Must be called once before DrawBuffer.
+; Receives:  nothing
+; Returns:   consoleHandle is set
+; Registers: none (EAX, ECX, EDX saved by USES)
+;-------------------------------------------------------------
+HideCursor PROC USES eax ecx edx
+    INVOKE GetStdHandle, STD_OUTPUT_HANDLE  ; ask Windows for the console output handle
+    mov  consoleHandle, eax                 ; save it for later drawing
+    INVOKE SetConsoleCursorInfo, consoleHandle, ADDR cursorInfo ; bVisible = 0 hides the cursor
+    ret                                     ; back to caller
+HideCursor ENDP
+
+;-------------------------------------------------------------
+; DrawBuffer
+; Purpose:   Copy the whole frameBuffer to the console at
+;            (0,0) with ONE Windows call, so there is no flicker.
+; Receives:  nothing (uses frameBuffer and consoleHandle)
+; Returns:   nothing
+; Registers: none (EAX, ECX, EDX saved by USES)
+;-------------------------------------------------------------
+DrawBuffer PROC USES eax ecx edx
+    INVOKE WriteConsoleOutputCharacter, ; write characters straight into the console
+           consoleHandle,               ; where to write
+           ADDR frameBuffer,            ; what to write
+           SCREEN_W * SCREEN_H,         ; how many characters (1920)
+           drawPos,                     ; start at column 0, row 0
+           ADDR charsWritten            ; Windows puts the count here
+    ret                                     ; back to caller
+DrawBuffer ENDP
+
+;-------------------------------------------------------------
+; DrawBar  (TEMPORARY TEST)
+; Purpose:   Draw a vertical bar of '#' down one column of
+;            the frameBuffer (all 24 rows).
+; Receives:  EAX = column (0..79)
+; Returns:   nothing
+; Registers: none (ECX, EDI saved by USES)
+;-------------------------------------------------------------
+DrawBar PROC USES ecx edi
+    mov  edi, OFFSET frameBuffer            ; EDI = start of buffer (row 0)
+    add  edi, eax                           ; move to the chosen column in row 0
+    mov  ecx, SCREEN_H                      ; ECX = 24 rows to fill
+BarRow:
+    mov  BYTE PTR [edi], '#'                ; put a '#' in this row
+    add  edi, SCREEN_W                      ; jump down one row (80 bytes further)
+    loop BarRow                             ; ECX--, repeat until ECX = 0
+    ret                                     ; back to caller
+DrawBar ENDP
+
+;-------------------------------------------------------------
+; TestBarLoop  (TEMPORARY TEST)
+; Purpose:   Draw 100 frames of a '#' bar moving right,
+;            30 ms per frame. Q quits early.
+; Receives:  nothing
+; Returns:   nothing
+; Registers: none (EAX, EBX, ECX, EDX saved by USES)
+;-------------------------------------------------------------
+TestBarLoop PROC USES eax ebx ecx edx
+    mov  ebx, 0                             ; EBX = frame number, start at 0
+FrameLoop:
+    call ClearBuffer                        ; start each frame with a blank buffer
+    mov  eax, ebx                           ; EAX = frame number
+    mov  edx, 0                             ; clear EDX before DIV
+    mov  ecx, SCREEN_W                      ; divide by 80
+    div  ecx                                ; EDX = frame mod 80 (bar column)
+    mov  eax, edx                           ; EAX = column for DrawBar
+    call DrawBar                            ; put the bar in the buffer
+    call DrawBuffer                         ; show the buffer on screen
+    mov  eax, 30                            ; 30 milliseconds
+    call Delay                              ; wait so we can see the frame
+    call ReadKey                            ; check for a key (does not wait)
+    jz   NoKey                              ; ZF = 1 means no key was pressed
+    cmp  al, 'q'                            ; lowercase q?
+    je   TestDone                           ; yes: stop
+    cmp  al, 'Q'                            ; uppercase Q?
+    je   TestDone                           ; yes: stop
+NoKey:
+    inc  ebx                                ; next frame
+    cmp  ebx, 100                           ; done 100 frames?
+    jb   FrameLoop                          ; no: draw another
+TestDone:
+    ret                                     ; back to caller
+TestBarLoop ENDP
 
 END main                                    ; program starts at main
