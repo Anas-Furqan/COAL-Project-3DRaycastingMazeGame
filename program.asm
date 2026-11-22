@@ -111,7 +111,7 @@ UpdateBlink PROTO                           ; blinkOn = 0 or 1, flips every 500 
 AnyKeyDown  PROTO                           ; EAX = 1 if any keyboard key is held
 WaitKeysReleased PROTO                      ; waits until keys are let go, sets mWasDown/qWasDown
 SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
-CastRay     PROTO, rayAngle:DWORD           ; EAX = distance (Q8), EDX = hitSide, ECX = hit type
+CastRay     PROTO, rayDirX:SDWORD, rayDirY:SDWORD ; EAX = distance (Q8), EDX = hitSide, ECX = hit type
 GetWallLevel PROTO, distance:DWORD, side:DWORD    ; EAX = wall shade level 0..3 for a distance
 GetFloorColor PROTO                         ; ECX = row in, EAX = floor colour for that row
 GetWallHeight PROTO                         ; EAX = distance in, EAX = real wall height in rows
@@ -145,6 +145,7 @@ STAR_CHAR      = '.'                        ; a star in the night sky
 STAR_ATTR      = C_FLOOR_NEAR               ; stars: slot 8 (C_FLOOR_NEAR), dim
 STAR_MOD       = 37                         ; star if (rayAngle*7 + row*13) mod 37 = 0
 EDGE_LOW       = 20                         ; wallX below this = near a cell corner
+PLANE_LEN      = 148                        ; tan(30 degrees) * 256: half-width of the camera plane
 EDGE_HIGH      = 236                        ; wallX above this = near a cell corner
 EDGE_WALLX_H   = 12                         ; corner test only for walls shorter than this
 BRICK_MIN_H    = 6                          ; walls shorter than this get no bricks
@@ -1485,9 +1486,10 @@ SetupAxis ENDP
 ; Purpose:   Send one ray from the player and find the
 ;            distance to the first wall, using DDA (jump from
 ;            grid line to grid line, one cell at a time).
-; Receives:  rayAngle = ray direction in degrees (0..359)
-; Returns:   EAX = distance to the wall (Q8), fisheye-
-;            corrected, at least 1
+; Receives:  rayDirX, rayDirY = ray direction (Q8), built
+;            from the camera plane by CastAllRays
+; Returns:   EAX = perpendicular distance to the wall (Q8),
+;            at least 1 (no fisheye correction needed)
 ;            EDX = hitSide (0 = hit an X gridline,
 ;                           1 = hit a Y gridline)
 ;            ECX = HIT_WALL, HIT_EXIT or HIT_KEY (what stopped the ray)
@@ -1495,7 +1497,7 @@ SetupAxis ENDP
 ;            rayWallX = where along that wall the ray hit (0..255)
 ; Registers: EAX, ECX, EDX (EBX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-CastRay PROC USES ebx esi edi, rayAngle:DWORD
+CastRay PROC USES ebx esi edi, rayDirX:SDWORD, rayDirY:SDWORD
     LOCAL mapX:SDWORD, mapY:SDWORD          ; the cell the ray is in now
     LOCAL stepX:SDWORD, stepY:SDWORD        ; +1 or -1 per axis
     LOCAL deltaX:SDWORD, deltaY:SDWORD      ; ray length to cross one cell, per axis
@@ -1505,13 +1507,9 @@ CastRay PROC USES ebx esi edi, rayAngle:DWORD
 
     mov  hitType, HIT_WALL                  ; assume a normal wall until we know
 
-    ; ----- block 1: ray direction from the tables -----
-    mov  eax, rayAngle                      ; EAX = ray angle
-    call GetCos                             ; EAX = cos * 256
-    mov  edi, eax                           ; EDI = dirX
-    mov  eax, rayAngle                      ; EAX = ray angle
-    call GetSin                             ; EAX = sin * 256
-    mov  esi, eax                           ; ESI = dirY
+    ; ----- block 1: ray direction (camera plane, from CastAllRays) -----
+    mov  edi, rayDirX                       ; EDI = dirX (Q8, not normalised)
+    mov  esi, rayDirY                       ; ESI = dirY (Q8, not normalised)
 
     ; ----- block 2: starting cell and DDA setup per axis -----
     mov  eax, posX                          ; EAX = player X (Q8)
@@ -1603,13 +1601,11 @@ HaveWallX:
     and  eax, 255                           ; fractional part = position along the wall
     mov  rayWallX, eax                      ; report it
 
-    ; ----- block 5: fisheye correction -----
-    ; distance straight ahead = ray distance * cos(rayAngle - angle)
-    mov  eax, rayAngle                      ; EAX = ray angle
-    sub  eax, angle                         ; angle between this ray and the view centre
-    call WrapAngle                          ; keep it 0..359 for the table
-    call GetCos                             ; EAX = cos(difference) * 256
-    FIXMUL eax, ebx                         ; EAX = cos * dist / 256 = straight-ahead distance (Q8)
+    ; ----- block 5: no fisheye correction needed -----
+    ; With the camera-plane ray (dir + plane * cameraX) the DDA
+    ; distance is already measured straight ahead (perpendicular
+    ; to the camera plane), so walls are not bent.
+    mov  eax, ebx                           ; EAX = perpendicular distance (Q8)
 
     ; ----- block 6: never return 0 or less (we divide by it later) -----
     cmp  eax, 1                             ; at least 1?
@@ -1956,14 +1952,50 @@ IsStar ENDP
 ;            column and store the results in the column arrays
 ;            (colAngle, colDist, hitSideCol, colType,
 ;            hitCellCol, colWallX).
-;            rayAngle = angle - FOV/2 + x*FOV/SCREEN_W
+;            Camera-plane method (every column gets its own ray):
+;              dir     = (cos, sin)                 Q8
+;              plane   = (-sin, cos) * tan(30)      148/256
+;              cameraX = (2x - 79) * 256 / 79       -256..256
+;              rayDir  = dir + plane * cameraX
+;            colAngle (only used for the stars) is still
+;            angle - FOV/2 + x*FOV/SCREEN_W.
 ; Receives:  nothing (uses angle, posX, posY)
 ; Returns:   column arrays filled
-; Registers: none (EAX, EBX, ECX, EDX saved by USES)
+; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-CastAllRays PROC USES eax ebx ecx edx
+CastAllRays PROC USES eax ebx ecx edx esi edi
+    LOCAL dirX:SDWORD, dirY:SDWORD          ; facing direction (Q8)
+    LOCAL planeX:SDWORD, planeY:SDWORD      ; camera plane (Q8)
+    mov  eax, angle                         ; EAX = facing angle
+    call GetCos                             ; EAX = cos * 256
+    mov  dirX, eax                          ; dirX = cos
+    mov  planeY, eax                        ; planeY = cos (scaled below)
+    mov  eax, angle                         ; EAX = facing angle
+    call GetSin                             ; EAX = sin * 256
+    mov  dirY, eax                          ; dirY = sin
+    neg  eax                                ; EAX = -sin
+    FIXMUL eax, PLANE_LEN                   ; EAX = -sin * tan(30)
+    mov  planeX, eax                        ; planeX
+    mov  eax, planeY                        ; EAX = cos
+    FIXMUL eax, PLANE_LEN                   ; EAX = cos * tan(30)
+    mov  planeY, eax                        ; planeY
     mov  ebx, 0                             ; EBX = column x, start at 0
 CastColumn:
+    ; cameraX = (2x - 79) * 256 / 79  (signed)
+    mov  eax, ebx                           ; EAX = x
+    shl  eax, 1                             ; 2x
+    sub  eax, SCREEN_W - 1                  ; 2x - 79 (-79..79)
+    shl  eax, 8                             ; * 256 (SHL also works for negative numbers)
+    cdq                                     ; sign-extend EAX into EDX before IDIV
+    mov  ecx, SCREEN_W - 1                  ; divide by 79
+    idiv ecx                                ; EAX = cameraX (Q8, -256..256)
+    mov  ecx, eax                           ; ECX = cameraX
+    mov  edi, planeX                        ; EDI = planeX
+    FIXMUL edi, ecx                         ; planeX * cameraX
+    add  edi, dirX                          ; EDI = rayDirX
+    mov  esi, planeY                        ; ESI = planeY
+    FIXMUL esi, ecx                         ; planeY * cameraX
+    add  esi, dirY                          ; ESI = rayDirY
     mov  eax, ebx                           ; EAX = x
     imul eax, FOV                           ; EAX = x * 60
     mov  edx, 0                             ; clear EDX before DIV (x*60 is positive)
@@ -1972,8 +2004,8 @@ CastColumn:
     add  eax, angle                         ; + player angle
     sub  eax, FOV / 2                       ; - 30: start at the left edge of the view
     call WrapAngle                          ; keep it 0..359
-    mov  colAngle[ebx*2], ax                ; store the ray angle (WORD, scaled index)
-    INVOKE CastRay, eax                     ; EAX = distance, EDX = hitSide, ECX = hit type
+    mov  colAngle[ebx*2], ax                ; store the angle for the stars (WORD, scaled index)
+    INVOKE CastRay, edi, esi                ; EAX = distance, EDX = hitSide, ECX = hit type
     mov  colDist[ebx*4], eax                ; store the distance (DWORD, scaled index)
     mov  hitSideCol[ebx], dl                ; store the side
     mov  colType[ebx], cl                   ; store what was hit
