@@ -89,6 +89,8 @@ HideCursor  PROTO                           ; hides the blinking console cursor
 LoadPalette PROTO                           ; saves the console palette, installs the blue/orange theme
 RestorePalette PROTO                        ; puts the saved palette back
 SetPalette  PROTO, infoPtr:PTR CSBI_EX      ; EAX = 1 if the palette in *infoPtr was applied
+SetRoleColor PROTO                          ; EAX = colour role in, sets the console text colour
+ApplyRoles  PROTO                           ; turns the roles in attrBuffer into real colours
 DrawBuffer  PROTO                           ; copies frameBuffer to the console
 GetMoveDelta PROTO                          ; returns EAX = dx, EDX = dy for one step forward
 IsWall      PROTO, testX:SDWORD, testY:SDWORD     ; EAX = CELL_FREE / CELL_WALL / CELL_EXIT
@@ -234,6 +236,7 @@ RGB_VIOLET     = 00FF5C7Ah                  ; slot 14 logo 2nd tone      #7A5CFF
 PAL_KEEP_TEXT  = 7                          ; slot 7 (light gray text) keeps its colour
 PAL_KEEP_WHITE = 15                         ; slot 15 (white) keeps its colour
 PAL_SLOTS      = 16                         ; the console has 16 colour slots
+FORCE_FALLBACK = 0                          ; debug: 1 = pretend the palette call failed
 
 
 .data
@@ -245,6 +248,18 @@ themeColors DWORD RGB_SKY, RGB_WALL_3, RGB_WALL_2, RGB_WALL_1    ; slots 0-3
 origInfo    CSBI_EX <>                      ; the console settings found at start (restored at exit)
 themeInfo   CSBI_EX <>                      ; the same settings with the theme colours
 paletteOK   DWORD 0                         ; 1 if the theme palette was installed
+
+; ---------- role -> console colour tables (index = role C_SKY .. C_WHITE) ----------
+; The game always draws with roles. roleColors (the active table) turns a
+; role into the real console colour: with the custom palette the role
+; number IS the palette slot; without it, standard colours that keep the
+; blue / orange look are used instead.
+customRoles   BYTE 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ; custom palette: role = slot
+fallbackRoles BYTE black, gray, gray, blue          ; sky, wall far, wall, wall
+              BYTE lightBlue, black, black, lightGray ; wall near, floor far, floor mid, text
+              BYTE gray, blue, lightRed, yellow     ; floor near/stars, map walls, door A, door B/accent
+              BYTE yellow, lightRed, lightMagenta, white ; gold, danger, violet, white
+roleColors    BYTE PAL_SLOTS DUP(?)                 ; the active table (filled by LoadPalette)
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
 ; '#' = wall, '.' = floor, 'E' = exit, 'K' = key. Cell (row, col) is at
 ; map + row*16 + col. originalMap is never changed; ResetGame copies it
@@ -360,7 +375,7 @@ loseArt BYTE "##### ##### #   # #####       #   # #### ", 0
         BYTE "  #     #   # # # ####        #   # #### ", 0
         BYTE "  #     #   #   # #           #   # #    ", 0
         BYTE "  #   ##### #   # #####        ###  #    ", 0
-logoColors BYTE C_WALL_0, C_WALL_1, C_WALL_2, C_VIOLET, C_VIOLET ; logo: blue (top) to violet (bottom)
+logoColors BYTE C_WALL_0, C_WALL_1, C_VIOLET, C_VIOLET, C_VIOLET ; logo: blue (top) to violet (bottom)
 winColors  BYTE 5 DUP(C_GOLD)                              ; win banner: gold
 loseColors BYTE 5 DUP(C_DANGER)                            ; lose banner: danger red
 subText    BYTE "A 3D RAYCASTING MAZE GAME IN x86 ASSEMBLY", 0 ; line under the logo
@@ -415,7 +430,7 @@ NewGame:
     INVOKE WaitKeysReleased                 ; the last key pressed can't trigger M or Q
     INVOKE ResetGame                        ; start position, angle, steps, timer
     mov    eax, DEFAULT_ATTR                ; normal colours (win/lose screens used gold/red)
-    call   SetTextColor                     ; Clrscr paints every cell with this colour
+    call   SetRoleColor                    ; Clrscr paints every cell with this colour
     call   Clrscr                           ; clean screen for the game
     INVOKE GameLoop                         ; play; EAX = how the game ended
     cmp    eax, RESULT_QUIT                 ; pressed Q?
@@ -432,7 +447,7 @@ AskAgain:
     je     NewGame                          ; yes: start a new game
 QuitProgram:
     mov    eax, DEFAULT_ATTR                ; normal colours for the console we leave behind
-    call   SetTextColor                     ; apply them
+    call   SetRoleColor                    ; apply them
     INVOKE RestorePalette                   ; give the console its own colours back
     call   Clrscr                           ; leave a clean console behind
     INVOKE ExitProcess, 0                   ; end the program with exit code 0
@@ -481,7 +496,7 @@ TitleScreen PROC USES edx
     call Clrscr                             ; clear the console
     INVOKE PrintArt, ADDR logoArt, ADDR logoColors, ART_LINES, LOGO_ROW, LOGO_COL ; big logo
     mov  eax, C_DOOR_B                      ; subtitle colour: orange accent
-    call SetTextColor                       ; apply it
+    call SetRoleColor                      ; apply it
     mov  dh, SUB_ROW                        ; row of the subtitle
     mov  dl, SUB_COL                        ; column of the subtitle
     call Gotoxy                             ; move the cursor there
@@ -495,7 +510,7 @@ TitleWait:
     je   PromptColor                        ; yes: keep orange
     mov  eax, C_FLOOR_NEAR                  ; no: dim
 PromptColor:
-    call SetTextColor                       ; apply the prompt colour
+    call SetRoleColor                      ; apply the prompt colour
     mov  dh, PRESS_ROW                      ; row of the prompt
     mov  dl, PRESS_COL                      ; column of the prompt
     call Gotoxy                             ; move the cursor there
@@ -508,7 +523,7 @@ PromptColor:
     movzx eax, al                           ; EAX = just the key code
     push eax                                ; keep the key
     mov  eax, DEFAULT_ATTR                  ; back to normal colours
-    call SetTextColor                       ; apply them
+    call SetRoleColor                      ; apply them
     pop  eax                                ; EAX = key again
     ret                                     ; back to caller
 TitleScreen ENDP
@@ -532,7 +547,7 @@ PrintArt PROC USES eax ecx edx esi edi, artPtr:PTR BYTE, colorPtr:PTR BYTE, line
     mov  ecx, lines                         ; ECX = lines left
 ArtLine:
     movzx eax, BYTE PTR [edi]               ; EAX = colour of this line
-    call SetTextColor                       ; apply it
+    call SetRoleColor                      ; apply it
     inc  edi                                ; next line's colour
     mov  eax, row                           ; EAX = row of this line
     mov  dh, al                             ; DH = row
@@ -603,11 +618,17 @@ HideCursor ENDP
 ;            were) and apply it. If the console does not allow
 ;            this (e.g. Windows Terminal), nothing changes and
 ;            the game runs with the standard colours.
+;            Finally the matching role table (customRoles or
+;            fallbackRoles) is copied into roleColors.
 ; Receives:  nothing (consoleHandle must be set by HideCursor)
-; Returns:   origInfo, themeInfo, paletteOK = 1 on success
+; Returns:   origInfo, themeInfo, paletteOK = 1 on success,
+;            roleColors filled
 ; Registers: none (EAX, ECX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
 LoadPalette PROC USES eax ecx esi edi
+IF FORCE_FALLBACK                           ; debug build: skip the palette completely
+    jmp  PaletteDone                        ; paletteOK stays 0 -> standard colours
+ENDIF
     mov  origInfo.cbSize, SIZEOF CSBI_EX    ; Windows checks the structure size
     INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR origInfo ; read the settings
     cmp  eax, 0                             ; did it fail?
@@ -632,8 +653,57 @@ NextSlot:
     INVOKE SetPalette, ADDR themeInfo       ; apply the theme, EAX = 1 if it worked
     mov  paletteOK, eax                     ; remember (restore only if we changed it)
 PaletteDone:
+    mov  esi, OFFSET customRoles            ; assume the theme palette is active
+    cmp  paletteOK, 0                       ; did it work?
+    jne  HaveRoles                          ; yes: role = palette slot
+    mov  esi, OFFSET fallbackRoles          ; no: standard colours with the same look
+HaveRoles:
+    cld                                     ; copy forwards
+    mov  edi, OFFSET roleColors             ; EDI = the active table
+    mov  ecx, PAL_SLOTS                     ; 16 roles
+    rep  movsb                              ; copy the chosen table
     ret                                     ; back to caller
 LoadPalette ENDP
+
+;-------------------------------------------------------------
+; SetRoleColor
+; Purpose:   Set the console text colour for a colour ROLE:
+;            the role is looked up in roleColors, then
+;            SetTextColor is called with the real colour.
+; Receives:  EAX = role (C_SKY .. C_WHITE, background 0)
+; Returns:   nothing (console text colour changed)
+; Registers: none (EAX, EBX saved by USES)
+;-------------------------------------------------------------
+SetRoleColor PROC USES eax ebx
+    and  eax, 0Fh                           ; only the foreground role (background is role 0)
+    mov  ebx, OFFSET roleColors             ; EBX = the active role table
+    xlat                                    ; AL = [EBX + AL] = real console colour
+    call SetTextColor                       ; apply it
+    ret                                     ; back to caller
+SetRoleColor ENDP
+
+;-------------------------------------------------------------
+; ApplyRoles
+; Purpose:   Turn every colour in attrBuffer from a ROLE into the
+;            real console colour (roleColors), just before the
+;            frame is drawn. Background stays 0 (the sky).
+; Receives:  nothing (uses attrBuffer, roleColors)
+; Returns:   attrBuffer changed
+; Registers: none (EAX, EBX, ECX, ESI saved by USES)
+;-------------------------------------------------------------
+ApplyRoles PROC USES eax ebx ecx esi
+    mov  ebx, OFFSET roleColors             ; EBX = table for XLAT
+    mov  esi, OFFSET attrBuffer             ; ESI = first colour
+    mov  ecx, SCREEN_W * BUF_H              ; ECX = 2000 cells
+RoleLoop:
+    mov  ax, [esi]                          ; AX = role of this cell
+    and  al, 0Fh                            ; foreground role only
+    xlat                                    ; AL = [EBX + AL] = real colour
+    mov  [esi], ax                          ; store it back
+    add  esi, 2                             ; next cell (2 bytes each)
+    loop RoleLoop                           ; ECX--, repeat for all cells
+    ret                                     ; back to caller
+ApplyRoles ENDP
 
 ;-------------------------------------------------------------
 ; RestorePalette
@@ -1940,7 +2010,7 @@ WinScreen PROC USES eax edx
     call Clrscr                             ; clear the console
     INVOKE PrintArt, ADDR winArt, ADDR winColors, ART_LINES, BANNER_ROW, WIN_COL ; gold banner
     mov  eax, C_WHITE                       ; white text
-    call SetTextColor                       ; apply the colour
+    call SetRoleColor                      ; apply the colour
     mov  dh, INFO_ROW                       ; first info line
     mov  dl, INFO_COL                       ; info column
     call Gotoxy                             ; move the cursor there
@@ -1983,7 +2053,7 @@ LoseScreen PROC USES eax edx
     call Clrscr                             ; clear the console
     INVOKE PrintArt, ADDR loseArt, ADDR loseColors, ART_LINES, BANNER_ROW, LOSE_COL ; red banner
     mov  eax, C_WHITE                       ; white text
-    call SetTextColor                       ; apply the colour
+    call SetRoleColor                      ; apply the colour
     mov  dh, INFO_ROW                       ; first info line
     mov  dl, INFO_COL                       ; info column
     call Gotoxy                             ; move the cursor there
@@ -2013,7 +2083,7 @@ LoseScreen ENDP
 AskPlayAgain PROC USES ecx edx
     INVOKE FlushConsoleInputBuffer, inputHandle ; forget keys pressed during the game
     mov  eax, DEFAULT_ATTR                  ; normal grey text
-    call SetTextColor                       ; apply the colour
+    call SetRoleColor                      ; apply the colour
     mov  edx, OFFSET againMsg               ; "Play again? (Y/N)"
     call WriteString                        ; print it
 AskLoop:
@@ -2058,6 +2128,7 @@ FrameLoop:
     call RenderView                         ; 3D walls into the buffer
     call DrawMinimap                        ; map + player on top (only if switched on)
     call DrawHUD                            ; time, steps, controls on the last row
+    call ApplyRoles                         ; roles -> real console colours
     call DrawBuffer                         ; show the frame on screen
     mov  eax, 30                            ; 30 milliseconds
     call Delay                              ; wait before the next frame
