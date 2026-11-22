@@ -15,6 +15,14 @@ MAP_W    = 16                               ; map width in cells
 MAP_H    = 16                               ; map height in cells
 FOV      = 60                               ; field of view in degrees
 
+; ---------- FIXMUL macro: Q8 fixed-point multiply ----------
+; dest = (dest * src) / 256. Two Q8 numbers multiplied give a
+; Q16 result, so SAR 8 brings it back to Q8 (SAR keeps the sign).
+FIXMUL MACRO dest, src
+    imul dest, src                          ;; dest = dest * src (signed)
+    sar  dest, 8                            ;; dest = dest / 256, sign kept
+ENDM
+
 ; ---------- Win32 function not declared in SmallWin.inc (lives in user32.lib) ----------
 GetAsyncKeyState PROTO, vKey:DWORD          ; AX bit 15 = 1 if the key is held down right now
 SetConsoleOutputCP PROTO, wCodePageID:DWORD ; (kernel32.lib) choose which character set the console shows
@@ -417,13 +425,11 @@ DrawBuffer ENDP
 GetMoveDelta PROC
     mov  eax, angle                         ; EAX = current angle
     call GetCos                             ; EAX = cos(angle) * 256
-    imul eax, MOVE_SPEED                    ; EAX = cos * 256 * MOVE_SPEED
-    sar  eax, 8                             ; divide by 256 (keeps the sign) -> dx in Q8
+    FIXMUL eax, MOVE_SPEED                  ; EAX = cos * MOVE_SPEED / 256 -> dx in Q8
     push eax                                ; save dx on the stack
     mov  eax, angle                         ; EAX = current angle
     call GetSin                             ; EAX = sin(angle) * 256
-    imul eax, MOVE_SPEED                    ; EAX = sin * 256 * MOVE_SPEED
-    sar  eax, 8                             ; divide by 256 (keeps the sign) -> dy in Q8
+    FIXMUL eax, MOVE_SPEED                  ; EAX = sin * MOVE_SPEED / 256 -> dy in Q8
     mov  edx, eax                           ; EDX = dy
     pop  eax                                ; EAX = dx again
     ret                                     ; back to caller
@@ -835,8 +841,7 @@ DirPositive:
     add  edx, 256                           ; EDX = gap to the next grid line (Q8)
 HaveGap:
     mov  ebx, eax                           ; EBX = deltaDist
-    imul ebx, edx                           ; EBX = deltaDist * gap (max 16384*256, no overflow)
-    sar  ebx, 8                             ; /256 back to Q8 -> sideDist
+    FIXMUL ebx, edx                         ; EBX = deltaDist * gap / 256 -> sideDist (no overflow)
     ret                                     ; back to caller
 SetupAxis ENDP
 
@@ -941,8 +946,7 @@ HaveRayDist:
     sub  eax, angle                         ; angle between this ray and the view centre
     call WrapAngle                          ; keep it 0..359 for the table
     call GetCos                             ; EAX = cos(difference) * 256
-    imul eax, ebx                           ; EAX = cos * dist (max ~256*6000, no overflow)
-    sar  eax, 8                             ; /256 back to Q8
+    FIXMUL eax, ebx                         ; EAX = cos * dist / 256 = straight-ahead distance (Q8)
 
     ; ----- block 6: never return 0 or less (we divide by it later) -----
     cmp  eax, 1                             ; at least 1?
