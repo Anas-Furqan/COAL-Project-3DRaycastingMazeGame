@@ -68,7 +68,8 @@ CastRay     PROTO, rayAngle:DWORD           ; EAX = distance (Q8), EDX = hitSide
 GetWallColor PROTO, distance:DWORD, side:DWORD    ; EAX = wall colour for a distance
 GetFloorChar PROTO                          ; ECX = row in, EAX = floor character for that row
 GetWallHeight PROTO                         ; EAX = distance in, EAX = wall height in rows
-DrawColumn  PROTO, column:DWORD, wallHeight:DWORD, wallColor:DWORD ; draws one screen column
+DrawColumn  PROTO, column:DWORD, wallHeight:DWORD, wallColor:DWORD, rayAngle:DWORD ; draws one screen column
+IsStar      PROTO, rayAngle:DWORD           ; ECX = row in, EAX = 1 if a star is at this ceiling cell
 RenderView  PROTO                           ; casts 80 rays and draws the 3D view
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
 HandleInput PROTO                           ; reads one key (no waiting) and acts on it
@@ -86,6 +87,9 @@ KEY_WAIT_TRIES = 200                        ; max 200 x 10 ms = 2 s waiting for 
 CODE_PAGE_437  = 437                        ; old IBM PC character set (has the block characters)
 FLOOR_BAND     = 3                          ; each floor shade covers 3 rows
 WALL_CHAR      = 219                        ; code page 437 full block: every wall cell
+STAR_CHAR      = '.'                        ; a star in the night sky
+STAR_ATTR      = gray + (black * 16)        ; stars are dim dark gray
+STAR_MOD       = 37                         ; star if (rayAngle*7 + row*13) mod 37 = 0
 DOOR_COLOR_A   = lightRed + (black * 16)    ; exit door colour 1 (bright red)
 DOOR_COLOR_B   = yellow + (black * 16)      ; exit door colour 2 (yellow)
 DEFAULT_ATTR   = lightGray + (black * 16)   ; normal colour: light gray text on black
@@ -1083,10 +1087,11 @@ GetWallHeight ENDP
 ; Receives:  column     = screen x (0..79)
 ;            wallHeight = wall size in rows (0..24)
 ;            wallColor  = colour attribute of the wall
+;            rayAngle   = angle of this column's ray (for stars)
 ; Returns:   nothing (frameBuffer, attrBuffer changed)
 ; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD, wallHeight:DWORD, wallColor:DWORD
+DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD, wallHeight:DWORD, wallColor:DWORD, rayAngle:DWORD
     mov  ebx, SCREEN_H                      ; EBX = 24
     sub  ebx, wallHeight                    ; rows not used by the wall
     shr  ebx, 1                             ; half above: EBX = first wall row
@@ -1108,8 +1113,13 @@ ColumnRow:
     mov  WORD PTR [esi], DEFAULT_ATTR       ; normal colour
     jmp  NextRow                            ; done with this row
 PutCeiling:
-    mov  BYTE PTR [edi], ' '                ; empty ceiling
+    mov  BYTE PTR [edi], ' '                ; assume empty black sky
     mov  WORD PTR [esi], DEFAULT_ATTR       ; normal colour
+    INVOKE IsStar, rayAngle                 ; EAX = 1 if a star belongs here
+    cmp  eax, 0                             ; no star?
+    je   NextRow                            ; then the row is done
+    mov  BYTE PTR [edi], STAR_CHAR          ; star character
+    mov  WORD PTR [esi], STAR_ATTR          ; dim dark gray
     jmp  NextRow                            ; done with this row
 PutWall:
     mov  BYTE PTR [edi], WALL_CHAR          ; solid block
@@ -1143,6 +1153,32 @@ UpdateBlink PROC USES eax ecx edx
 UpdateBlink ENDP
 
 ;-------------------------------------------------------------
+; IsStar
+; Purpose:   Decide if a ceiling cell shows a star. Stars are
+;            tied to the ray angle, so they move with the view:
+;            star if (rayAngle*7 + row*13) mod 37 = 0.
+; Receives:  rayAngle = ray angle (0..359), ECX = row (0..23)
+; Returns:   EAX = 1 for a star, 0 for empty sky
+; Registers: EAX (EBX, EDX saved by USES)
+;-------------------------------------------------------------
+IsStar PROC USES ebx edx, rayAngle:DWORD
+    mov  eax, rayAngle                      ; EAX = ray angle
+    imul eax, 7                             ; EAX = rayAngle * 7
+    mov  ebx, ecx                           ; EBX = row
+    imul ebx, 13                            ; EBX = row * 13
+    add  eax, ebx                           ; EAX = rayAngle*7 + row*13 (always positive)
+    mov  edx, 0                             ; clear EDX before DIV
+    mov  ebx, STAR_MOD                      ; divide by 37
+    div  ebx                                ; EDX = remainder (mod 37)
+    mov  eax, 0                             ; assume no star
+    cmp  edx, 0                             ; remainder 0?
+    jne  StarDone                           ; no: empty sky
+    mov  eax, 1                             ; yes: a star
+StarDone:
+    ret                                     ; back to caller
+IsStar ENDP
+
+;-------------------------------------------------------------
 ; RenderView
 ; Purpose:   Draw the 3D view: one ray per screen column.
 ;            rayAngle = angle - FOV/2 + x*FOV/SCREEN_W
@@ -1151,6 +1187,7 @@ UpdateBlink ENDP
 ; Registers: none (EAX, EBX, ECX, EDX saved by USES)
 ;-------------------------------------------------------------
 RenderView PROC USES eax ebx ecx edx
+    LOCAL rayAng:DWORD                      ; this column's ray angle (CastRay changes EAX)
     mov  ebx, 0                             ; EBX = column x, start at 0
 ViewColumn:
     mov  eax, ebx                           ; EAX = x
@@ -1161,6 +1198,7 @@ ViewColumn:
     add  eax, angle                         ; + player angle
     sub  eax, FOV / 2                       ; - 30: start at the left edge of the view
     call WrapAngle                          ; keep it 0..359
+    mov  rayAng, eax                        ; remember the ray angle for the stars
     INVOKE CastRay, eax                     ; EAX = distance, EDX = hitSide, ECX = exit?
     push eax                                ; keep the distance for the height
     cmp  ecx, 1                             ; did the ray hit the exit door?
@@ -1176,7 +1214,7 @@ ExitColumn:
 HaveWallColor:
     pop  eax                                ; EAX = distance again
     call GetWallHeight                      ; EAX = wall height in rows
-    INVOKE DrawColumn, ebx, eax, ecx        ; draw this column
+    INVOKE DrawColumn, ebx, eax, ecx, rayAng ; draw this column
     inc  ebx                                ; next column
     cmp  ebx, SCREEN_W                      ; all 80 columns done?
     jb   ViewColumn                         ; no: next column
