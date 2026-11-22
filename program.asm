@@ -56,6 +56,12 @@ GetMoveDelta PROTO                          ; returns EAX = dx, EDX = dy for one
 IsWall      PROTO, testX:SDWORD, testY:SDWORD     ; EAX = CELL_FREE / CELL_WALL / CELL_EXIT
 ProbePoint  PROTO, newPos:SDWORD, delta:SDWORD    ; EAX = newPos pushed MARGIN further in move direction
 TryMove     PROTO, moveDX:SDWORD, moveDY:SDWORD   ; moves the player if no wall is in the way
+HandleCell  PROTO, cellType:DWORD, testX:SDWORD, testY:SDWORD ; exit / key touched by a probe
+CollectKey  PROTO, testX:SDWORD, testY:SDWORD     ; removes the key there, keys++, message
+TouchExit   PROTO                           ; win with 3 keys, else "door locked" message
+ShowMessage PROTO, msgPtr:PTR BYTE, msgAttr:DWORD ; show a HUD message for 2 seconds
+MsSince     PROTO, since:DWORD              ; EAX = ms since an earlier GetMseconds value
+DrawMessage PROTO                           ; writes the active message into the HUD row
 InitInput   PROTO                           ; gets the console input handle
 KeyDown     PROTO, vKey:DWORD               ; EAX = 1 if key is held down now
 KeyPressed  PROTO, vKey:DWORD, prevPtr:PTR BYTE   ; EAX = 1 only on the frame the key goes down
@@ -139,7 +145,13 @@ DEFAULT_ATTR   = lightGray + (black * 16)   ; normal colour: light gray text on 
 ; ---------- cell types returned by IsWall ----------
 CELL_FREE = 0                               ; floor: can walk here
 CELL_WALL = 1                               ; '#': blocks movement
-CELL_EXIT = 2                               ; 'E': blocks movement, touching it wins
+CELL_EXIT = 2                               ; 'E': blocks movement, touching it with 3 keys wins
+CELL_KEY  = 3                               ; 'K': blocks movement, touching it collects the key
+KEYS_NEEDED   = 3                           ; keys needed to open the exit door
+MSG_MS        = 2000                        ; HUD messages stay for 2 seconds
+KEY_MSG_DIGIT = 11                          ; position of n in "KEY FOUND! n/3"
+KEY_MSG_ATTR  = yellow + (black * 16)       ; "KEY FOUND" message colour
+LOCKED_ATTR   = lightRed + (black * 16)     ; "DOOR LOCKED" message colour
 
 ; ---------- game start values and results ----------
 START_X     = 384                           ; 1.5 cells: centre of column 1
@@ -156,6 +168,8 @@ TIME_LIMIT  = 120                           ; seconds allowed to reach the exit
 HUD_MIN_POS  = 5                            ; "TIME mm:ss": minutes start at column 5
 HUD_SEC_POS  = 8                            ; seconds start at column 8
 HUD_STEP_POS = 18                           ; "STEPS nnnnn": steps start at column 18
+HUD_KEY_POS  = 30                           ; "KEYS n/3": the key count is at column 30
+HUD_MSG_POS  = 35                           ; messages replace the controls text from column 35
 HUD_TIME_LEN = 10                           ; "TIME mm:ss" is 10 characters
 LOW_TIME     = 20                           ; timer turns red below 20 seconds
 TIMER_ATTR     = white + (black * 16)       ; timer colour: bright white
@@ -189,6 +203,10 @@ posX      DWORD START_X                     ; X in Q8, set again by ResetGame
 posY      DWORD START_Y                     ; Y in Q8, set again by ResetGame
 angle     DWORD START_ANGLE                 ; facing direction in degrees (0..359), 0 = east
 steps     DWORD 0                           ; number of steps the player has taken
+keys      DWORD 0                           ; keys collected so far (0..3)
+msgText   DWORD 0                           ; address of the HUD message, 0 = no message
+msgColor  DWORD 0                           ; colour of the HUD message
+msgStart  DWORD 0                           ; GetMseconds value when the message started
 startTime DWORD 0                           ; time (ms from GetMseconds) when the game started
 
 ; ---------- game state flags ----------
@@ -292,8 +310,10 @@ boxColors  BYTE lightCyan, 8 DUP(white), lightCyan         ; border lines cyan, 
 pressKey   BYTE "PRESS ANY KEY", 0                         ; blinking prompt
 
 ; ---------- HUD text (numbers are filled in each frame) ----------
-hudTemplate BYTE "TIME 00:00  STEPS 00000  W/S move  A/D turn  M map  Q quit"
+hudTemplate BYTE "TIME 00:00  STEPS 00000  KEYS 0/3  W/S move  A/D turn  M map  Q quit"
 HUD_LEN = ($ - hudTemplate)                 ; number of characters in the template
+keyMsg     BYTE "KEY FOUND! 0/3", 0                    ; the 0 is replaced by the key count
+lockedMsg  BYTE "DOOR LOCKED - FIND 3 KEYS", 0         ; shown when touching the door too early
 
 ; ---------- end screen text ----------
 loseText   BYTE "You did not reach the exit in time.", 0  ; lose message
@@ -568,8 +588,8 @@ GetMoveDelta ENDP
 ; Purpose:   Find out what kind of cell a Q8 position is in.
 ; Receives:  testX, testY = position in Q8 (cells * 256)
 ;            (a position outside the 16x16 map counts as a wall)
-; Returns:   EAX = CELL_WALL ('#'), CELL_EXIT ('E') or
-;                  CELL_FREE (anything else)
+; Returns:   EAX = CELL_WALL ('#'), CELL_EXIT ('E'),
+;                  CELL_KEY ('K') or CELL_FREE (anything else)
 ; Registers: EAX (EBX, ESI saved by USES)
 ;-------------------------------------------------------------
 IsWall PROC USES ebx esi, testX:SDWORD, testY:SDWORD
@@ -591,6 +611,9 @@ IsWall PROC USES ebx esi, testX:SDWORD, testY:SDWORD
     mov  eax, CELL_EXIT                     ; assume exit
     cmp  bl, 'E'                            ; is it the exit?
     je   WallDone                           ; yes: return CELL_EXIT
+    mov  eax, CELL_KEY                      ; assume key
+    cmp  bl, 'K'                            ; is it a key?
+    je   WallDone                           ; yes: return CELL_KEY
     mov  eax, CELL_FREE                     ; otherwise free floor
     jmp  WallDone                           ; finished
 OutsideMap:
@@ -625,26 +648,26 @@ ProbePoint ENDP
 ; Purpose:   Move the player by (moveDX, moveDY) if no wall is
 ;            within MARGIN of the new position. X and Y are
 ;            checked separately so the player slides along
-;            walls. steps++ if it moved. If a probe touches
-;            the exit, wonFlag = 1 (the exit blocks like a wall).
+;            walls. steps++ if it moved. A probe touching the
+;            exit or a key is handled by HandleCell (exit and
+;            keys block like walls).
 ; Receives:  moveDX, moveDY = movement in Q8
-; Returns:   posX, posY, steps, wonFlag updated
-; Registers: none (EAX, ECX, EDX saved by USES)
+; Returns:   posX, posY, steps (and via HandleCell: keys,
+;            wonFlag, message) updated
+; Registers: none (EAX, ECX, EDX, ESI saved by USES)
 ;-------------------------------------------------------------
-TryMove PROC USES eax ecx edx, moveDX:SDWORD, moveDY:SDWORD
+TryMove PROC USES eax ecx edx esi, moveDX:SDWORD, moveDY:SDWORD
     mov  ecx, 0                             ; ECX = 1 once we really move
     cmp  moveDX, 0                          ; any X movement at all?
     je   TryY                               ; no: skip the X test
     mov  edx, posX                          ; EDX = current X
     add  edx, moveDX                        ; EDX = new X
     INVOKE ProbePoint, edx, moveDX          ; EAX = new X + margin ahead
-    INVOKE IsWall, eax, posY                ; that point with OLD Y: what cell?
-    cmp  eax, CELL_EXIT                     ; touching the exit?
-    jne  XNotExit                           ; no
-    mov  wonFlag, 1                         ; yes: the player wins
-XNotExit:
+    mov  esi, eax                           ; ESI = probe X
+    INVOKE IsWall, esi, posY                ; that point with OLD Y: what cell?
+    INVOKE HandleCell, eax, esi, posY       ; exit or key touched? (EAX kept)
     cmp  eax, CELL_FREE                     ; free floor?
-    jne  TryY                               ; wall or exit: do not move in X
+    jne  TryY                               ; wall, exit or key: do not move in X
     mov  posX, edx                          ; free: accept the new X
     mov  ecx, 1                             ; remember that we moved
 TryY:
@@ -653,13 +676,11 @@ TryY:
     mov  edx, posY                          ; EDX = current Y
     add  edx, moveDY                        ; EDX = new Y
     INVOKE ProbePoint, edx, moveDY          ; EAX = new Y + margin ahead
-    INVOKE IsWall, posX, eax                ; (maybe new) X with that Y: what cell?
-    cmp  eax, CELL_EXIT                     ; touching the exit?
-    jne  YNotExit                           ; no
-    mov  wonFlag, 1                         ; yes: the player wins
-YNotExit:
+    mov  esi, eax                           ; ESI = probe Y
+    INVOKE IsWall, posX, esi                ; (maybe new) X with that Y: what cell?
+    INVOKE HandleCell, eax, posX, esi       ; exit or key touched? (EAX kept)
     cmp  eax, CELL_FREE                     ; free floor?
-    jne  MoveDone                           ; wall or exit: do not move in Y
+    jne  MoveDone                           ; wall, exit or key: do not move in Y
     mov  posY, edx                          ; free: accept the new Y
     mov  ecx, 1                             ; remember that we moved
 MoveDone:
@@ -669,6 +690,150 @@ MoveDone:
 NoStep:
     ret                                     ; back to caller
 TryMove ENDP
+
+;-------------------------------------------------------------
+; HandleCell
+; Purpose:   React to the cell a movement probe touched:
+;            exit -> TouchExit, key -> CollectKey.
+;            Other cells need nothing here.
+; Receives:  cellType     = result of IsWall
+;            testX, testY = the probe point (Q8)
+; Returns:   nothing (keys, gameMap, wonFlag, message may change)
+; Registers: none (EAX saved by USES)
+;-------------------------------------------------------------
+HandleCell PROC USES eax, cellType:DWORD, testX:SDWORD, testY:SDWORD
+    cmp  cellType, CELL_EXIT                ; touching the exit door?
+    jne  NotExitCell                        ; no
+    call TouchExit                          ; yes: win or "door locked"
+    jmp  CellDone                           ; finished
+NotExitCell:
+    cmp  cellType, CELL_KEY                 ; touching a key?
+    jne  CellDone                           ; no: nothing to do
+    INVOKE CollectKey, testX, testY         ; yes: pick it up
+CellDone:
+    ret                                     ; back to caller
+HandleCell ENDP
+
+;-------------------------------------------------------------
+; CollectKey
+; Purpose:   Pick up the key at a Q8 position: the map cell
+;            becomes floor, keys++, and the HUD shows
+;            "KEY FOUND! n/3" for 2 seconds.
+; Receives:  testX, testY = a point inside the key cell (Q8)
+; Returns:   gameMap, keys, keyMsg, message updated
+; Registers: none (EAX, EBX saved by USES)
+;-------------------------------------------------------------
+CollectKey PROC USES eax ebx, testX:SDWORD, testY:SDWORD
+    mov  eax, testY                         ; EAX = Y in Q8
+    sar  eax, 8                             ; row (IsWall already checked it is inside the map)
+    shl  eax, 4                             ; row * 16
+    mov  ebx, testX                         ; EBX = X in Q8
+    sar  ebx, 8                             ; column
+    add  eax, ebx                           ; EAX = row*16 + col
+    mov  gameMap[eax], '.'                  ; the key is gone: plain floor now
+    inc  keys                               ; one more key
+    mov  eax, keys                          ; EAX = keys collected (1..3)
+    add  al, '0'                            ; turn it into a digit character
+    mov  keyMsg[KEY_MSG_DIGIT], al          ; put it into "KEY FOUND! n/3"
+    INVOKE ShowMessage, ADDR keyMsg, KEY_MSG_ATTR ; show it in the HUD
+    ret                                     ; back to caller
+CollectKey ENDP
+
+;-------------------------------------------------------------
+; TouchExit
+; Purpose:   The player touched the exit door. With all 3 keys
+;            the player wins; otherwise the HUD shows
+;            "DOOR LOCKED - FIND 3 KEYS" for 2 seconds.
+; Receives:  nothing (uses keys)
+; Returns:   wonFlag = 1 or message set
+; Registers: none
+;-------------------------------------------------------------
+TouchExit PROC
+    cmp  keys, KEYS_NEEDED                  ; all keys collected? (unsigned count)
+    jb   DoorLocked                         ; no: the door stays locked
+    mov  wonFlag, 1                         ; yes: the player escapes
+    ret                                     ; back to caller
+DoorLocked:
+    INVOKE ShowMessage, ADDR lockedMsg, LOCKED_ATTR ; tell the player why
+    ret                                     ; back to caller
+TouchExit ENDP
+
+;-------------------------------------------------------------
+; ShowMessage
+; Purpose:   Start showing a message in the HUD for MSG_MS
+;            (2000) milliseconds.
+; Receives:  msgPtr  = address of a 0-terminated message
+;            msgAttr = its colour
+; Returns:   msgText, msgColor, msgStart set
+; Registers: none (EAX saved by USES)
+;-------------------------------------------------------------
+ShowMessage PROC USES eax, msgPtr:PTR BYTE, msgAttr:DWORD
+    mov  eax, msgPtr                        ; EAX = message address
+    mov  msgText, eax                       ; remember which message
+    mov  eax, msgAttr                       ; EAX = colour
+    mov  msgColor, eax                      ; remember its colour
+    call GetMseconds                        ; EAX = time now
+    mov  msgStart, eax                      ; the message starts now
+    ret                                     ; back to caller
+ShowMessage ENDP
+
+;-------------------------------------------------------------
+; MsSince
+; Purpose:   Milliseconds since an earlier GetMseconds value.
+;            GetMseconds restarts at 0 at midnight, so a
+;            negative difference gets one day added.
+; Receives:  since = earlier GetMseconds value
+; Returns:   EAX = milliseconds passed
+; Registers: EAX only
+;-------------------------------------------------------------
+MsSince PROC, since:DWORD
+    call GetMseconds                        ; EAX = milliseconds since midnight now
+    sub  eax, since                         ; EAX = milliseconds since then
+    jns  SinceOK                            ; not negative: normal case
+    add  eax, MS_PER_DAY                    ; negative: midnight passed, add one day
+SinceOK:
+    ret                                     ; back to caller
+MsSince ENDP
+
+;-------------------------------------------------------------
+; DrawMessage
+; Purpose:   If a message is active (shown for less than 2 s),
+;            write it over the controls text in the HUD, in its
+;            colour. When the time is over, clear it.
+; Receives:  nothing (uses msgText, msgColor, msgStart)
+; Returns:   nothing (HUD row of the frame changed, msgText may
+;            become 0)
+; Registers: none (EAX, ECX, ESI, EDI saved by USES)
+;-------------------------------------------------------------
+DrawMessage PROC USES eax ecx esi edi
+    cmp  msgText, 0                         ; any message?
+    je   MsgDone                            ; no: keep the controls text
+    INVOKE MsSince, msgStart                ; EAX = how long it has been shown
+    cmp  eax, MSG_MS                        ; 2 seconds or more?
+    jb   MsgShow                            ; no: show it
+    mov  msgText, 0                         ; yes: the message is over
+    jmp  MsgDone                            ; keep the controls text
+MsgShow:
+    cld                                     ; string instructions go forwards
+    mov  al, ' '                            ; blank out the message area first
+    mov  ecx, SCREEN_W - HUD_MSG_POS        ; ECX = cells from the message column to the end
+    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W + HUD_MSG_POS ; EDI = message area
+    rep  stosb                              ; fill it with spaces
+    mov  eax, msgColor                      ; AX = message colour
+    mov  ecx, SCREEN_W - HUD_MSG_POS        ; ECX = same number of cells
+    mov  edi, OFFSET attrBuffer + (HUD_ROW * SCREEN_W + HUD_MSG_POS) * 2 ; EDI = their colours
+    rep  stosw                              ; colour the whole area
+    mov  esi, msgText                       ; ESI = message text
+    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W + HUD_MSG_POS ; EDI = message area
+MsgCopy:
+    lodsb                                   ; AL = [ESI], ESI++
+    cmp  al, 0                              ; end of the message?
+    je   MsgDone                            ; yes: finished
+    stosb                                   ; [EDI] = AL, EDI++
+    jmp  MsgCopy                            ; next character
+MsgDone:
+    ret                                     ; back to caller
+DrawMessage ENDP
 
 ;-------------------------------------------------------------
 ; TurnPlayer
@@ -1444,6 +1609,8 @@ ResetGame PROC USES eax ecx esi edi
     mov  steps, 0                           ; no steps yet
     mov  quitFlag, 0                        ; not quitting
     mov  wonFlag, 0                         ; not won yet
+    mov  keys, 0                            ; no keys yet
+    mov  msgText, 0                         ; no HUD message
     call GetMseconds                        ; EAX = milliseconds since midnight
     mov  startTime, eax                     ; the timer starts now
     ret                                     ; back to caller
@@ -1457,11 +1624,7 @@ ResetGame ENDP
 ; Registers: EAX (ECX, EDX saved by USES)
 ;-------------------------------------------------------------
 GetElapsedSec PROC USES ecx edx
-    call GetMseconds                        ; EAX = milliseconds since midnight now
-    sub  eax, startTime                     ; EAX = milliseconds since the start
-    jns  NoMidnight                         ; result not negative: normal case
-    add  eax, MS_PER_DAY                    ; negative: midnight passed, add one day
-NoMidnight:
+    INVOKE MsSince, startTime               ; EAX = milliseconds since the start
     mov  edx, 0                             ; clear EDX before DIV
     mov  ecx, 1000                          ; 1000 ms in a second
     div  ecx                                ; EAX = whole seconds
@@ -1546,6 +1709,10 @@ DrawHUD PROC USES eax ebx ecx edx esi edi
     mov  ecx, edi                           ; ECX = HUD row start
     add  ecx, HUD_STEP_POS                  ; ECX = where the steps go
     INVOKE PutNumber, ecx, steps, 5         ; write the step count (5 digits)
+    mov  ecx, edi                           ; ECX = HUD row start
+    add  ecx, HUD_KEY_POS                   ; ECX = where the key count goes
+    INVOKE PutNumber, ecx, keys, 1          ; write the key count (1 digit)
+    call DrawMessage                        ; "KEY FOUND" / "DOOR LOCKED" over the controls
     call GetRemainingSec                    ; EAX = seconds left
     mov  edx, TIMER_ATTR                    ; assume plenty of time: bright white
     cmp  eax, LOW_TIME                      ; under 20 seconds left?
