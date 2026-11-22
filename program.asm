@@ -34,6 +34,23 @@ ENDM
 GetAsyncKeyState PROTO, vKey:DWORD          ; AX bit 15 = 1 if the key is held down right now
 SetConsoleOutputCP PROTO, wCodePageID:DWORD ; (kernel32.lib) choose which character set the console shows
 
+; ---------- console palette (kernel32.lib, not in SmallWin.inc) ----------
+; Same layout as the Windows CONSOLE_SCREEN_BUFFER_INFOEX structure (96 bytes).
+; ColorTable holds the 16 palette colours as COLORREF = 00BBGGRRh.
+CSBI_EX STRUCT
+  cbSize               DWORD ?              ; size of this structure (must be set before the call)
+  dwSize               COORD <>             ; buffer size in cells
+  dwCursorPosition     COORD <>             ; cursor position
+  wAttributes          WORD ?               ; current text colour
+  srWindow             SMALL_RECT <>        ; visible window rectangle
+  dwMaximumWindowSize  COORD <>             ; largest possible window
+  wPopupAttributes     WORD ?               ; colour of pop-up windows
+  bFullscreenSupported DWORD ?              ; full-screen flag
+  ColorTable           DWORD 16 DUP(?)      ; the 16 palette colours
+CSBI_EX ENDS
+GetConsoleScreenBufferInfoEx PROTO, hConsole:DWORD, lpInfo:PTR CSBI_EX ; EAX = 0 on failure
+SetConsoleScreenBufferInfoEx PROTO, hConsole:DWORD, lpInfo:PTR CSBI_EX ; EAX = 0 on failure
+
 ; ---------- procedure prototypes ----------
 GetSin      PROTO                           ; EAX = angle in, EAX = sin*256 out
 GetCos      PROTO                           ; EAX = angle in, EAX = cos*256 out
@@ -51,6 +68,9 @@ LoseScreen  PROTO                           ; shows the "time's up" screen
 AskPlayAgain PROTO                          ; EAX = 1 for Y, 0 for N or Q
 ClearBuffer PROTO                           ; fills frameBuffer with spaces
 HideCursor  PROTO                           ; hides the blinking console cursor
+LoadPalette PROTO                           ; saves the console palette, installs the blue/orange theme
+RestorePalette PROTO                        ; puts the saved palette back
+SetPalette  PROTO, infoPtr:PTR CSBI_EX      ; EAX = 1 if the palette in *infoPtr was applied
 DrawBuffer  PROTO                           ; copies frameBuffer to the console
 GetMoveDelta PROTO                          ; returns EAX = dx, EDX = dy for one step forward
 IsWall      PROTO, testX:SDWORD, testY:SDWORD     ; EAX = CELL_FREE / CELL_WALL / CELL_EXIT
@@ -175,7 +195,34 @@ LOW_TIME     = 20                           ; timer turns red below 20 seconds
 TIMER_ATTR     = white + (black * 16)       ; timer colour: bright white
 TIMER_LOW_ATTR = lightRed + (black * 16)    ; timer colour when time is short: bright red
 
+; ---------- theme colours: COLORREF = 00BBGGRRh (web #RRGGBB written backwards) ----------
+RGB_SKY        = 001A0E0Ah                  ; slot 0  sky / background   #0A0E1A
+RGB_WALL_3     = 006E2A2Ah                  ; slot 1  wall level 3 (far) #2A2A6E blue-violet
+RGB_WALL_2     = 00B04F3Fh                  ; slot 2  wall level 2       #3F4FB0
+RGB_WALL_1     = 00E07F5Bh                  ; slot 3  wall level 1       #5B7FE0
+RGB_WALL_0     = 00FFB48Ah                  ; slot 4  wall level 0 (near)#8AB4FF
+RGB_FLOOR_FAR  = 001D1614h                  ; slot 5  floor far          #14161D
+RGB_FLOOR_MID  = 002A211Eh                  ; slot 6  floor mid          #1E212A
+RGB_FLOOR_NEAR = 003A2F2Bh                  ; slot 8  floor near / stars #2B2F3A
+RGB_MAP_WALL   = 007A4034h                  ; slot 9  minimap walls      #34407A
+RGB_DOOR_A     = 002B6AFFh                  ; slot 10 door A             #FF6A2B red-orange
+RGB_DOOR_B     = 0047B3FFh                  ; slot 11 door B / accent    #FFB347 yellow-orange
+RGB_GOLD       = 004AD5FFh                  ; slot 12 keys / gold        #FFD54A
+RGB_DANGER     = 003D4DFFh                  ; slot 13 danger (timer<20s) #FF4D3D
+RGB_VIOLET     = 00FF5C7Ah                  ; slot 14 logo 2nd tone      #7A5CFF violet
+PAL_KEEP_TEXT  = 7                          ; slot 7 (light gray text) keeps its colour
+PAL_KEEP_WHITE = 15                         ; slot 15 (white) keeps its colour
+PAL_SLOTS      = 16                         ; the console has 16 colour slots
+
 .data
+; ---------- console palette ----------
+themeColors DWORD RGB_SKY, RGB_WALL_3, RGB_WALL_2, RGB_WALL_1    ; slots 0-3
+            DWORD RGB_WALL_0, RGB_FLOOR_FAR, RGB_FLOOR_MID, 0    ; slots 4-7 (7 is kept)
+            DWORD RGB_FLOOR_NEAR, RGB_MAP_WALL, RGB_DOOR_A, RGB_DOOR_B ; slots 8-11
+            DWORD RGB_GOLD, RGB_DANGER, RGB_VIOLET, 0            ; slots 12-15 (15 is kept)
+origInfo    CSBI_EX <>                      ; the console settings found at start (restored at exit)
+themeInfo   CSBI_EX <>                      ; the same settings with the theme colours
+paletteOK   DWORD 0                         ; 1 if the theme palette was installed
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
 ; '#' = wall, '.' = floor, 'E' = exit, 'K' = key. Cell (row, col) is at
 ; map + row*16 + col. originalMap is never changed; ResetGame copies it
@@ -336,6 +383,7 @@ againMsg   BYTE "Play again? (Y/N)", 0                    ; question on both scr
 main PROC
     INVOKE SetConsoleOutputCP, CODE_PAGE_437 ; show bytes 176..219 as block characters
     INVOKE HideCursor                       ; get console handle and hide the cursor
+    INVOKE LoadPalette                      ; blue/orange theme (keeps standard colours if it fails)
     INVOKE InitInput                        ; get console input handle (for flushing keys)
     INVOKE TitleScreen                      ; show the title screen, EAX = key pressed
     and    al, 11011111b                    ; make the key uppercase
@@ -363,6 +411,7 @@ AskAgain:
 QuitProgram:
     mov    eax, lightGray + (black * 16)    ; normal colours for the console we leave behind
     call   SetTextColor                     ; apply them
+    INVOKE RestorePalette                   ; give the console its own colours back
     call   Clrscr                           ; leave a clean console behind
     INVOKE ExitProcess, 0                   ; end the program with exit code 0
 main ENDP
@@ -522,6 +571,90 @@ HideCursor PROC USES eax ecx edx
     INVOKE SetConsoleCursorInfo, consoleHandle, ADDR cursorInfo ; bVisible = 0 hides the cursor
     ret                                     ; back to caller
 HideCursor ENDP
+
+;-------------------------------------------------------------
+; LoadPalette
+; Purpose:   Read the console settings (GetConsoleScreenBufferInfoEx)
+;            and keep them in origInfo. Then copy them to
+;            themeInfo, replace the palette colours with the
+;            blue/orange theme (slots 7 and 15 stay as they
+;            were) and apply it. If the console does not allow
+;            this (e.g. Windows Terminal), nothing changes and
+;            the game runs with the standard colours.
+; Receives:  nothing (consoleHandle must be set by HideCursor)
+; Returns:   origInfo, themeInfo, paletteOK = 1 on success
+; Registers: none (EAX, ECX, ESI, EDI saved by USES)
+;-------------------------------------------------------------
+LoadPalette PROC USES eax ecx esi edi
+    mov  origInfo.cbSize, SIZEOF CSBI_EX    ; Windows checks the structure size
+    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR origInfo ; read the settings
+    cmp  eax, 0                             ; did it fail?
+    je   PaletteDone                        ; yes: keep the standard colours
+    cld                                     ; copy forwards
+    mov  esi, OFFSET origInfo               ; ESI = the original settings
+    mov  edi, OFFSET themeInfo              ; EDI = the copy we change
+    mov  ecx, SIZEOF CSBI_EX                ; ECX = 96 bytes
+    rep  movsb                              ; copy them
+    mov  ecx, 0                             ; ECX = slot number 0..15
+SlotLoop:
+    cmp  ecx, PAL_KEEP_TEXT                 ; slot 7 (normal text)?
+    je   NextSlot                           ; yes: keep it
+    cmp  ecx, PAL_KEEP_WHITE                ; slot 15 (white)?
+    je   NextSlot                           ; yes: keep it
+    mov  eax, themeColors[ecx*4]            ; EAX = theme colour for this slot (4 bytes each)
+    mov  themeInfo.ColorTable[ecx*4], eax   ; put it into the palette
+NextSlot:
+    inc  ecx                                ; next slot
+    cmp  ecx, PAL_SLOTS                     ; all 16 done?
+    jb   SlotLoop                           ; no: continue
+    INVOKE SetPalette, ADDR themeInfo       ; apply the theme, EAX = 1 if it worked
+    mov  paletteOK, eax                     ; remember (restore only if we changed it)
+PaletteDone:
+    ret                                     ; back to caller
+LoadPalette ENDP
+
+;-------------------------------------------------------------
+; RestorePalette
+; Purpose:   Put the console colours back the way they were
+;            when the program started (only if LoadPalette
+;            changed them).
+; Receives:  nothing (uses paletteOK, origInfo)
+; Returns:   nothing
+; Registers: none (EAX saved by USES)
+;-------------------------------------------------------------
+RestorePalette PROC USES eax
+    cmp  paletteOK, 0                       ; did we change the palette?
+    je   RestoreDone                        ; no: nothing to undo
+    INVOKE SetPalette, ADDR origInfo        ; yes: original colours back
+RestoreDone:
+    ret                                     ; back to caller
+RestorePalette ENDP
+
+;-------------------------------------------------------------
+; SetPalette
+; Purpose:   Apply a CSBI_EX structure with
+;            SetConsoleScreenBufferInfoEx. Windows reads the
+;            window rectangle one cell smaller than it returned
+;            it, so Right and Bottom are increased by 1 for the
+;            call (and put back afterwards) to stop the window
+;            from shrinking.
+; Receives:  infoPtr = address of the CSBI_EX to apply
+; Returns:   EAX = 1 if it worked, 0 if not
+; Registers: EAX (EBX saved by USES)
+;-------------------------------------------------------------
+SetPalette PROC USES ebx, infoPtr:PTR CSBI_EX
+    mov  ebx, infoPtr                       ; EBX = address of the structure
+    inc  (CSBI_EX PTR [ebx]).srWindow.Right ; window width fix
+    inc  (CSBI_EX PTR [ebx]).srWindow.Bottom ; window height fix
+    INVOKE SetConsoleScreenBufferInfoEx, consoleHandle, ebx ; apply palette and settings
+    dec  (CSBI_EX PTR [ebx]).srWindow.Right ; undo the fix in memory
+    dec  (CSBI_EX PTR [ebx]).srWindow.Bottom ; (DEC does not change EAX)
+    cmp  eax, 0                             ; did Windows accept it?
+    je   SetDone                            ; no: return 0
+    mov  eax, 1                             ; yes: return 1
+SetDone:
+    ret                                     ; back to caller
+SetPalette ENDP
 
 ;-------------------------------------------------------------
 ; DrawBuffer
