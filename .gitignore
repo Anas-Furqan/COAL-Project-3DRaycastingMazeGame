@@ -12,3 +12,6 @@ x64/
 *.ilk
 *.log
 *.tlog
+test_run.ps1
+test_shots/
+report_notes.md

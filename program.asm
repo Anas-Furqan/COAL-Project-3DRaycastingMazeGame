@@ -1,7 +1,14 @@
 ; ------------------------------------------------------------
-; WOLF-86 - COAL Lab Project
-; First-person 3D raycasting maze game in the Windows console
-; Find the exit (E) before the timer runs out.
+; WOLF-86 - 3D Raycasting Maze Game
+; Author:   Saif Nawaz
+; Course:   EL-2003 COAL Lab, Fall 2026
+; Language: 32-bit x86 assembly (MASM) + Irvine32 library
+;
+; First-person 3D raycasting maze game in the Windows console.
+; Find the exit (E) before the 120-second timer runs out.
+; One ray per screen column (80) is cast with the DDA method.
+; All maths is integer fixed-point Q8 (value * 256), sin/cos
+; from a 360-entry table. No FPU / SSE instructions are used.
 ; ------------------------------------------------------------
 
 INCLUDE Irvine32.inc                        ; Irvine32 library procedures and Win32 prototypes
@@ -64,7 +71,7 @@ DrawColumn  PROTO, column:DWORD, wallHeight:DWORD, wallChar:DWORD ; draws one sc
 RenderView  PROTO                           ; casts 80 rays and draws the 3D view
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
 HandleInput PROTO                           ; reads one key (no waiting) and acts on it
-DrawMinimap PROTO                           ; copies map + 'P' into the frame buffer
+DrawMinimap PROTO                           ; copies map + direction arrow into the frame buffer
 GameLoop    PROTO                           ; main loop, EAX = RESULT_QUIT / WIN / LOSE
 
 ; ---------- movement settings ----------
