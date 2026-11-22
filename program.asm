@@ -85,6 +85,7 @@ KEY_WAIT_TRIES = 200                        ; max 200 x 10 ms = 2 s waiting for 
 CODE_PAGE_437  = 437                        ; old IBM PC character set (has the block characters)
 FLOOR_BAND     = 3                          ; each floor shade covers 3 rows
 EXIT_CHAR      = 186                        ; code page 437 double vertical line: the exit door
+DEFAULT_ATTR   = lightGray + (black * 16)   ; normal colour: light gray text on black
 
 ; ---------- cell types returned by IsWall ----------
 CELL_FREE = 0                               ; floor: can walk here
@@ -189,6 +190,7 @@ floorShades BYTE '#', 'x', '-', '.'         ; floor: nearest rows first
 
 ; ---------- screen drawing data ----------
 frameBuffer   BYTE SCREEN_W * BUF_H DUP(' ')      ; 80x25 = 2000 chars, cell (row,col) at row*80 + col
+attrBuffer    WORD SCREEN_W * BUF_H DUP(DEFAULT_ATTR) ; colour of each cell, same layout (2 bytes each)
 consoleHandle DWORD ?                       ; handle of the console output (set by HideCursor)
 cursorInfo    CONSOLE_CURSOR_INFO <100, 0>  ; cursor size 100%, bVisible = 0 (hidden)
 drawPos       COORD <0, 0>                  ; screen position (0,0) where drawing starts
@@ -359,7 +361,8 @@ TitleScreen ENDP
 ;-------------------------------------------------------------
 ; ClearBuffer
 ; Purpose:   Fill the whole frameBuffer (view + HUD row) with
-;            spaces.
+;            spaces and the whole attrBuffer with the normal
+;            colour (light gray on black).
 ; Receives:  nothing
 ; Returns:   nothing
 ; Registers: none (EAX, ECX, EDI saved by USES)
@@ -370,6 +373,10 @@ ClearBuffer PROC USES eax ecx edi
     mov  ecx, SCREEN_W * BUF_H              ; ECX = how many bytes (2000)
     mov  edi, OFFSET frameBuffer            ; EDI = start of the buffer
     rep  stosb                              ; store AL at [EDI], EDI++, repeat ECX times
+    mov  ax, DEFAULT_ATTR                   ; AX = the word to store (normal colour)
+    mov  ecx, SCREEN_W * BUF_H              ; ECX = how many words (2000)
+    mov  edi, OFFSET attrBuffer             ; EDI = start of the colour buffer
+    rep  stosw                              ; store AX at [EDI], EDI += 2, repeat ECX times
     ret                                     ; back to caller
 ClearBuffer ENDP
 
@@ -391,17 +398,19 @@ HideCursor ENDP
 
 ;-------------------------------------------------------------
 ; DrawBuffer
-; Purpose:   Copy the frameBuffer to the console one row at a
-;            time: 25 calls (24 view rows + HUD row), each
-;            writing 80 chars to (0,row).
+; Purpose:   Copy frameBuffer and attrBuffer to the console one
+;            row at a time: for each of the 25 rows (24 view rows
+;            + HUD row) write 80 chars, then their 80 colours,
+;            to (0,row).
 ;            Nothing is cleared, only overwritten, so no flicker,
 ;            and each row starts at column 0 at any console width.
-; Receives:  nothing (uses frameBuffer and consoleHandle)
+; Receives:  nothing (uses frameBuffer, attrBuffer, consoleHandle)
 ; Returns:   nothing
-; Registers: none (EAX, EBX, ECX, EDX, ESI saved by USES)
+; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-DrawBuffer PROC USES eax ebx ecx edx esi
-    mov  esi, OFFSET frameBuffer            ; ESI = start of row 0 in the buffer
+DrawBuffer PROC USES eax ebx ecx edx esi edi
+    mov  esi, OFFSET frameBuffer            ; ESI = start of row 0 of the characters
+    mov  edi, OFFSET attrBuffer             ; EDI = start of row 0 of the colours
     mov  ebx, 0                             ; EBX = row number, start at 0
 RowLoop:
     mov  drawPos.X, 0                       ; screen column 0
@@ -412,6 +421,13 @@ RowLoop:
            SCREEN_W,                    ; how many characters (80, one row)
            drawPos,                     ; start at (0, row)
            ADDR charsWritten            ; Windows puts the count here
+    INVOKE WriteConsoleOutputAttribute, ; write the colours of the same 80 cells
+           consoleHandle,               ; where to write
+           edi,                         ; what to write: attrBuffer + row*80 words
+           SCREEN_W,                    ; how many colours (80, one row)
+           drawPos,                     ; start at (0, row)
+           ADDR charsWritten            ; Windows puts the count here
+    add  edi, SCREEN_W * 2                  ; next row of colours (each colour is 2 bytes)
     add  esi, SCREEN_W                      ; move ESI to the start of the next row
     inc  ebx                                ; next row number
     cmp  ebx, BUF_H                         ; done all 25 rows?
