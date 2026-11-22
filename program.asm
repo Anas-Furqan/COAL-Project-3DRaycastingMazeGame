@@ -25,22 +25,29 @@ MAP_H    = 16                               ; map height in cells
 FOV      = 60                               ; field of view in degrees
 
 ; ---------- colour attributes = palette slot (background slot 0 = near-black sky) ----------
-C_SKY        = 0                            ; sky / background
-C_WALL_3     = 1                            ; wall, far
-C_WALL_2     = 2                            ; wall
-C_WALL_1     = 3                            ; wall
-C_WALL_0     = 4                            ; wall, near
-C_FLOOR_FAR  = 5                            ; floor, far
-C_FLOOR_MID  = 6                            ; floor, middle
+C_SKY        = 0                            ; sky / background, edge lines
+C_BRICK_0    = 1                            ; blue brick, near (brightest)
+C_BRICK_1    = 2                            ; blue brick
+C_BRICK_2    = 3                            ; blue brick
+C_BRICK_3    = 4                            ; blue brick, far
+C_OUTLINE    = 5                            ; dark outline, darkest mortar and seams
+C_STONE_0    = 6                            ; slate stone, near
 C_TEXT       = 7                            ; normal text (light gray, unchanged)
-C_FLOOR_NEAR = 8                            ; floor near, stars
-C_MAP_WALL   = 9                            ; minimap walls and borders
-C_DOOR_A     = 10                           ; door colour 1 (red-orange)
-C_DOOR_B     = 11                           ; door colour 2, accent text (yellow-orange)
-C_GOLD       = 12                           ; keys, player arrow, win banner
-C_DANGER     = 13                           ; timer under 20 s, lose banner
-C_OUTLINE    = 14                           ; wall outline (top/bottom row), darkest mortar
+C_STONE_1    = 8                            ; slate stone
+C_STONE_2    = 9                            ; slate stone
+C_STONE_3    = 10                           ; slate stone, far
+C_FLOOR_NEAR = 11                           ; floor near the player
+C_FLOOR_FAR  = 12                           ; floor at the horizon
+C_DOOR_A     = 13                           ; door colour 1, danger (red-orange)
+C_GOLD       = 14                           ; keys, door colour 2, accents (gold)
 C_WHITE      = 15                           ; white (unchanged)
+C_WALL_0     = C_BRICK_0                    ; other names used by the title, HUD and minimap
+C_WALL_1     = C_BRICK_1                    ; logo gradient
+C_WALL_2     = C_BRICK_2                    ; logo gradient
+C_WALL_3     = C_BRICK_3                    ; logo gradient
+C_MAP_WALL   = C_BRICK_3                    ; minimap brick walls and borders
+C_DOOR_B     = C_GOLD                       ; door colour 2 and accent text
+C_DANGER     = C_DOOR_A                     ; timer under 20 s, lose banner
 
 ; ---------- FIXMUL macro: Q8 fixed-point multiply ----------
 ; dest = (dest * src) / 256. Two Q8 numbers multiplied give a
@@ -124,10 +131,10 @@ WaitKeysReleased PROTO                      ; waits until keys are let go, sets 
 SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
 CastRay     PROTO, rayDirX:SDWORD, rayDirY:SDWORD ; EAX = distance (Q8), EDX = hitSide, ECX = hit type
 GetWallLevel PROTO, distance:DWORD, side:DWORD    ; EAX = wall shade level 0..3 for a distance
-GetFloorPixel PROTO                         ; ECX = pixel row in, EAX = floor colour role
+GetFloorPixel PROTO, column:DWORD           ; ECX = pixel row in, EAX = floor colour role
 GetWallHeight PROTO                         ; EAX = distance in, EAX = real wall height in rows
 DrawPixelColumn PROTO, column:DWORD         ; draws one pixel column into pixBuf
-GetColumnKind PROTO, column:DWORD           ; EAX = KIND_EDGE / KIND_DOOR / KIND_KEY / KIND_BRICK
+GetColumnKind PROTO, column:DWORD           ; EAX = KIND_EDGE / DOOR / KEY / BRICK / STONE
 GetWallPixel PROTO, kind:DWORD, level:DWORD, wallX:DWORD, texRow:DWORD, lineH:DWORD ; EAX = colour of one wall pixel
 CastAllRays PROTO                           ; casts the 80 rays into the column arrays
 IsEdgeColumn PROTO, column:DWORD            ; EAX = 1 if the column is an edge between walls
@@ -154,23 +161,26 @@ PIX_W          = VIEW_COLS                  ; pixel columns of the 3D view (one 
 PIX_H          = VIEW_ROWS_CELLS * 2        ; pixel rows: two pixels per console cell
 HORIZON        = PIX_H / 2                  ; pixel row of the horizon
 HALF_BLOCK     = 223                        ; code page 437 upper half block
+FLOOR_BANDS    = 5                          ; floor gradient bands (dithered)
 KIND_EDGE      = 0                          ; wall slice kinds (GetColumnKind)
 KIND_DOOR      = 1                          ; exit door
 KIND_KEY       = 2                          ; key
 KIND_BRICK     = 3                          ; brick wall '#'
+KIND_STONE     = 4                          ; stone wall '%'
 WALL_CHAR      = 219                        ; code page 437 full block: every wall cell
 STAR_CHAR      = '.'                        ; a star in the night sky
-STAR_ATTR      = C_FLOOR_NEAR               ; stars: slot 8 (C_FLOOR_NEAR), dim
+STAR_ATTR      = C_STONE_3                  ; stars: dim grey-violet
 STAR_MOD       = 61                         ; star if (rayAngle*7 + row*13) mod 61 = 0 (few stars)
-EDGE_LOW       = 20                         ; wallX below this = near a cell corner
 PLANE_LEN      = 148                        ; tan(30 degrees) * 256: half-width of the camera plane
-EDGE_HIGH      = 236                        ; wallX above this = near a cell corner
-EDGE_WALLX_H   = 12                         ; corner test only for walls shorter than this
-BRICK_MIN_H    = 6                          ; walls shorter than this get no bricks
-BRICK_ROW_H    = 4                          ; texY 0 and 4 are mortar rows (2 brick rows per wall)
+TEX_ROWS       = 32                         ; texture rows per wall cell (texY = 0..31)
+BRICK_ROW_H    = 8                          ; brick height in texture rows (4 brick rows per cell)
 BRICK_W        = 64                         ; brick width in wallX units (4 bricks per cell)
 BRICK_SHIFT    = 32                         ; odd brick rows are shifted by half a brick
-JOINT_W        = 8                          ; vertical joint width in wallX units
+JOINT_W        = 6                          ; vertical brick joint width in wallX units
+STONE_ROW_H    = 16                         ; stone block height in texture rows (2 per cell)
+STONE_W        = 128                        ; stone block width in wallX units (2 per cell)
+STONE_SHIFT    = 64                         ; odd stone rows are shifted by half a block
+SEAM_W         = 4                          ; vertical stone seam width in wallX units
 
 ; ---------- title / end screen layout (row, column on the console) ----------
 ART_LINES   = 5                             ; block letters are 5 rows tall
@@ -201,7 +211,8 @@ BOX_BR        = 217                         ; bottom-right corner
 BOX_H         = 196                         ; horizontal line
 BOX_V         = 179                         ; vertical line
 BORDER_ATTR   = C_MAP_WALL                  ; border: slot 9 (C_MAP_WALL)
-MAP_WALL_ATTR = C_MAP_WALL                  ; walls: slot 9 (C_MAP_WALL)
+MAP_WALL_ATTR = C_MAP_WALL                  ; brick walls on the minimap
+MAP_STONE_ATTR = C_STONE_2                  ; stone walls on the minimap
 MAP_EXIT_ATTR = C_DOOR_A                    ; exit: slot 10 (C_DOOR_A, red-orange)
 MAP_KEY_ATTR  = C_GOLD                      ; keys: slot 12 (C_GOLD)
 PLAYER_ATTR   = C_GOLD                      ; player arrow: slot 12 (C_GOLD)
@@ -253,20 +264,20 @@ HUD_KEYS_COL   = 25                         ; "KEYS n/3" starts at column 25
 HUD_KEYS_LEN   = 8                          ; "KEYS n/3" is 8 characters
 
 ; ---------- theme colours: COLORREF = 00BBGGRRh (web #RRGGBB written backwards) ----------
-RGB_SKY        = 001A0E0Ah                  ; slot 0  sky / background   #0A0E1A
-RGB_WALL_3     = 00A85444h                  ; slot 1  wall level 3 (far) #4454A8
-RGB_WALL_2     = 00D0725Ah                  ; slot 2  wall level 2       #5A72D0
-RGB_WALL_1     = 00F09C7Ch                  ; slot 3  wall level 1       #7C9CF0
-RGB_WALL_0     = 00FFC6A9h                  ; slot 4  wall level 0 (near)#A9C6FF
-RGB_FLOOR_FAR  = 001E1714h                  ; slot 5  floor far          #14171E
-RGB_FLOOR_MID  = 0029201Ch                  ; slot 6  floor mid          #1C2029
-RGB_FLOOR_NEAR = 00382B26h                  ; slot 8  floor near / stars #262B38 dark slate
-RGB_MAP_WALL   = 007A4034h                  ; slot 9  minimap walls      #34407A
-RGB_DOOR_A     = 002B6AFFh                  ; slot 10 door A             #FF6A2B red-orange
-RGB_DOOR_B     = 0047B3FFh                  ; slot 11 door B / accent    #FFB347 yellow-orange
-RGB_GOLD       = 004AD5FFh                  ; slot 12 keys / gold        #FFD54A
-RGB_DANGER     = 003D4DFFh                  ; slot 13 danger (timer<20s) #FF4D3D
-RGB_OUTLINE    = 00451F1Ah                  ; slot 14 wall outline       #1A1F45
+RGB_SKY        = 001A0E0Ah                  ; slot 0  sky                #0A0E1A
+RGB_BRICK_0    = 00FFC6A9h                  ; slot 1  brick near         #A9C6FF
+RGB_BRICK_1    = 00F09C7Ch                  ; slot 2  brick              #7C9CF0
+RGB_BRICK_2    = 00D0725Ah                  ; slot 3  brick              #5A72D0
+RGB_BRICK_3    = 00A85444h                  ; slot 4  brick far          #4454A8
+RGB_OUTLINE    = 00451F1Ah                  ; slot 5  outline / mortar   #1A1F45
+RGB_STONE_0    = 00B88F8Ah                  ; slot 6  stone near         #8A8FB8
+RGB_STONE_1    = 009C736Fh                  ; slot 8  stone              #6F739C
+RGB_STONE_2    = 00805A56h                  ; slot 9  stone              #565A80
+RGB_STONE_3    = 0066423Eh                  ; slot 10 stone far          #3E4266
+RGB_FLOOR_NEAR = 0044342Eh                  ; slot 11 floor near         #2E3444
+RGB_FLOOR_FAR  = 001E1714h                  ; slot 12 floor far          #14171E
+RGB_DOOR_A     = 002B6AFFh                  ; slot 13 door / danger      #FF6A2B red-orange
+RGB_GOLD       = 004AC9FFh                  ; slot 14 keys / door B      #FFC94A gold
 PAL_KEEP_TEXT  = 7                          ; slot 7 (light gray text) keeps its colour
 PAL_KEEP_WHITE = 15                         ; slot 15 (white) keeps its colour
 PAL_SLOTS      = 16                         ; the console has 16 colour slots
@@ -275,10 +286,10 @@ FORCE_FALLBACK = 0                          ; debug: 1 = pretend the palette cal
 
 .data
 ; ---------- console palette ----------
-themeColors DWORD RGB_SKY, RGB_WALL_3, RGB_WALL_2, RGB_WALL_1    ; slots 0-3
-            DWORD RGB_WALL_0, RGB_FLOOR_FAR, RGB_FLOOR_MID, 0    ; slots 4-7 (7 is kept)
-            DWORD RGB_FLOOR_NEAR, RGB_MAP_WALL, RGB_DOOR_A, RGB_DOOR_B ; slots 8-11
-            DWORD RGB_GOLD, RGB_DANGER, RGB_OUTLINE, 0           ; slots 12-15 (15 is kept)
+themeColors DWORD RGB_SKY, RGB_BRICK_0, RGB_BRICK_1, RGB_BRICK_2   ; slots 0-3
+            DWORD RGB_BRICK_3, RGB_OUTLINE, RGB_STONE_0, 0       ; slots 4-7 (7 is kept)
+            DWORD RGB_STONE_1, RGB_STONE_2, RGB_STONE_3, RGB_FLOOR_NEAR ; slots 8-11
+            DWORD RGB_FLOOR_FAR, RGB_DOOR_A, RGB_GOLD, 0         ; slots 12-15 (15 is kept)
 origInfo    CSBI_EX <>                      ; the console settings found at start (restored at exit)
 themeInfo   CSBI_EX <>                      ; the same settings with the theme colours
 paletteOK   DWORD 0                         ; 1 if the theme palette was installed
@@ -293,31 +304,32 @@ windowOK    DWORD 0                         ; 1 if the window was set to the gam
 ; number IS the palette slot; without it, standard colours that keep the
 ; blue / orange look are used instead.
 customRoles   BYTE 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ; custom palette: role = slot
-fallbackRoles BYTE black, blue, blue, blue          ; sky/edges, wall far, wall, wall
-              BYTE lightBlue, black, black, lightGray ; wall near, floor far, floor mid, text
-              BYTE gray, blue, lightRed, yellow     ; floor near/stars, map walls, door A, door B/accent
-              BYTE yellow, lightRed, gray, white    ; gold, danger, outline, white
+fallbackRoles BYTE black, lightBlue, lightBlue, blue ; sky/edges, brick 0, brick 1, brick 2
+              BYTE blue, gray, lightGray, lightGray ; brick 3, outline, stone 0, text
+              BYTE lightGray, gray, gray, gray      ; stone 1, stone 2, stone 3, floor near
+              BYTE black, lightRed, yellow, white   ; floor far, door/danger, gold, white
 roleColors    BYTE PAL_SLOTS DUP(?)                 ; the active table (filled by LoadPalette)
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
-; '#' = wall, '.' = floor, 'E' = exit, 'K' = key. Cell (row, col) is at
+; '#' = brick wall, '%' = stone wall (same as '#' for movement and rays),
+; '.' = floor, 'E' = exit, 'K' = key. Cell (row, col) is at
 ; map + row*16 + col. originalMap is never changed; ResetGame copies it
 ; into gameMap, the copy the game plays on (collected keys become '.').
-originalMap BYTE "################"         ; row 0  (outer wall)
-            BYTE "#......#.......#"         ; row 1  (player starts at col 1)
-            BYTE "#.##.#.#.#####.#"         ; row 2
-            BYTE "#.#..#...#..K#.#"         ; row 3  (key at col 12)
-            BYTE "#.#.####.#.#.#.#"         ; row 4
-            BYTE "#...#....#.#...#"         ; row 5
-            BYTE "###.#.####.###.#"         ; row 6
-            BYTE "#...#.#....#...#"         ; row 7
-            BYTE "#.###.#.####.#.#"         ; row 8
-            BYTE "#.#...#......#.#"         ; row 9
-            BYTE "#.#.#######.##.#"         ; row 10
-            BYTE "#...#.....#..#.#"         ; row 11
-            BYTE "#.###.###.##.#.#"         ; row 12
-            BYTE "#.....#......#.#"         ; row 13
-            BYTE "#K#####K######E#"         ; row 14 (keys at cols 1 and 7, exit at col 14)
-            BYTE "################"         ; row 15 (outer wall)
+originalMap BYTE "%%%%%%%%%%%%%%%%"         ; row 0  (outer wall)
+            BYTE "%......#.......%"         ; row 1  (player starts at col 1)
+            BYTE "%.##.#.#.%%%%%.%"         ; row 2
+            BYTE "%.#..#...%..K%.%"         ; row 3  (key at col 12)
+            BYTE "%.#.####.%.#.%.%"         ; row 4
+            BYTE "%...#....%.#...%"         ; row 5
+            BYTE "%%%.#.####.###.%"         ; row 6
+            BYTE "%...#.#....#...%"         ; row 7
+            BYTE "%.###.#.####.#.%"         ; row 8
+            BYTE "%.#...#......#.%"         ; row 9
+            BYTE "%.#.%%%%%%%.##.%"         ; row 10
+            BYTE "%...%.....#..#.%"         ; row 11
+            BYTE "%.###.###.##.#.%"         ; row 12
+            BYTE "%.....#......#.%"         ; row 13
+            BYTE "%K#####K######E%"         ; row 14 (keys at cols 1 and 7, exit at col 14)
+            BYTE "%%%%%%%%%%%%%%%%"         ; row 15 (outer wall)
 gameMap     BYTE MAP_W * MAP_H DUP('#')   ; working copy of the map (filled by ResetGame)
 
 ; ---------- player data (positions are Q8: value = cells * 256) ----------
@@ -393,8 +405,8 @@ sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
 shadeDist1  DWORD 512                       ; under 2 cells  -> level 0 (darkest/solid)
 shadeDist2  DWORD 1024                      ; under 4 cells  -> level 1
 shadeDist3  DWORD 2048                      ; under 8 cells  -> level 2, else level 3
-wallColors  BYTE C_WALL_0, C_WALL_1, C_WALL_2, C_WALL_3, C_OUTLINE ; wall shades near->far, then outline (darkest)
-floorColors BYTE C_FLOOR_NEAR, C_FLOOR_MID, C_FLOOR_FAR, C_FLOOR_FAR ; floor: nearest rows first
+brickColors BYTE C_BRICK_0, C_BRICK_1, C_BRICK_2, C_BRICK_3, C_OUTLINE, C_OUTLINE ; brick shades near->far, then darker for mortar
+stoneColors BYTE C_STONE_0, C_STONE_1, C_STONE_2, C_STONE_3, C_OUTLINE, C_OUTLINE ; stone shades near->far, then darker for seams
 
 ; ---------- screen drawing data ----------
 frameBuffer   BYTE SCREEN_W * BUF_H DUP(0)  ; text overlay (HUD, minimap): cell (row,col) at row*SCREEN_W + col, 0 = no text
@@ -405,7 +417,6 @@ writeRect     SMALL_RECT <>                 ; area WriteConsoleOutput draws (set
 consoleHandle DWORD ?                       ; handle of the console output (set by HideCursor)
 cursorInfo    CONSOLE_CURSOR_INFO <100, 0>  ; cursor size 100%, bVisible = 0 (hidden)
 drawPos       COORD <0, 0>                  ; screen position (0,0) where drawing starts
-charsWritten  DWORD ?                       ; Windows stores how many chars it wrote here
 
 ; ---------- title screen ----------
 ; ---------- WOLF-86 in block letters ('#' is printed as a solid block) ----------
@@ -933,7 +944,9 @@ IsWall PROC USES ebx esi, testX:SDWORD, testY:SDWORD
     mov  esi, OFFSET gameMap                ; ESI = base address of the map
     mov  bl, [esi + eax]                    ; BL = map character (base-index addressing)
     mov  eax, CELL_WALL                     ; assume wall
-    cmp  bl, '#'                            ; is it a wall?
+    cmp  bl, '#'                            ; is it a brick wall?
+    je   WallDone                           ; yes: return CELL_WALL
+    cmp  bl, '%'                            ; is it a stone wall?
     je   WallDone                           ; yes: return CELL_WALL
     mov  eax, CELL_EXIT                     ; assume exit
     cmp  bl, 'E'                            ; is it the exit?
@@ -1417,8 +1430,10 @@ PutCell ENDP
 ; Registers: EAX, EBX
 ;-------------------------------------------------------------
 GetMapLook PROC
-    cmp  al, '#'                            ; wall?
+    cmp  al, '#'                            ; brick wall?
     je   LookWall                           ; yes
+    cmp  al, '%'                            ; stone wall?
+    je   LookStone                          ; yes
     cmp  al, 'E'                            ; exit?
     je   LookExit                           ; yes
     cmp  al, 'K'                            ; key?
@@ -1429,6 +1444,10 @@ GetMapLook PROC
 LookWall:
     mov  eax, WALL_CHAR                     ; solid block
     mov  ebx, MAP_WALL_ATTR                 ; blue-gray
+    ret                                     ; back to caller
+LookStone:
+    mov  eax, WALL_CHAR                     ; solid block
+    mov  ebx, MAP_STONE_ATTR                ; grey-violet
     ret                                     ; back to caller
 LookExit:
     mov  eax, 'E'                           ; letter E
@@ -1629,7 +1648,9 @@ CheckCell:
     mov  eax, mapY                          ; EAX = row
     shl  eax, 4                             ; row * 16
     add  eax, mapX                          ; row*16 + col
-    cmp  gameMap[eax], '#'                  ; is this cell a wall?
+    cmp  gameMap[eax], '#'                  ; is this cell a brick wall?
+    je   RayHit                             ; yes: stop
+    cmp  gameMap[eax], '%'                  ; is it a stone wall?
     je   RayHit                             ; yes: stop
     cmp  gameMap[eax], 'K'                  ; is it a key?
     je   RayKey                             ; yes: keys also stop the ray
@@ -1700,7 +1721,7 @@ CastRay ENDP
 ;            level 0 (near, brightest) .. 3 (far, darkest)
 ; Receives:  distance = wall distance (Q8)
 ;            side     = hitSide from CastRay (0 or 1)
-; Returns:   EAX = level 0..3 (index into wallColors)
+; Returns:   EAX = level 0..3 (index into brickColors / stoneColors)
 ; Registers: EAX only
 ;-------------------------------------------------------------
 GetWallLevel PROC, distance:DWORD, side:DWORD
@@ -1732,27 +1753,50 @@ GetWallLevel ENDP
 
 ;-------------------------------------------------------------
 ; GetFloorPixel
-; Purpose:   Colour of one floor pixel. The floor fades from
-;            the near colour (bottom of the view) to the far
-;            colour (horizon) in four bands.
-; Receives:  ECX = pixel row (HORIZON..PIX_H-1)
+; Purpose:   Colour of one floor pixel: a smooth gradient from
+;            the near colour (bottom) to the far colour
+;            (horizon), made from two colours with ordered
+;            dithering in five bands:
+;              band 0: near, 1: 3/4 near, 2: checkerboard,
+;              3: 1/4 near, 4: far
+; Receives:  column = pixel column, ECX = pixel row
 ; Returns:   EAX = colour role
 ; Registers: EAX (EDX saved by USES)
 ;-------------------------------------------------------------
-GetFloorPixel PROC USES edx
+GetFloorPixel PROC USES edx, column:DWORD
     mov  eax, PIX_H - 1                     ; EAX = bottom pixel row
     sub  eax, ecx                           ; EAX = rows above the bottom (0 = nearest)
-    shl  eax, 2                             ; * 4 bands
+    imul eax, FLOOR_BANDS                   ; * 5 bands
     mov  edx, 0                             ; clear EDX before DIV
     push ecx                                ; keep the row
-    mov  ecx, HORIZON                       ; divide by the floor height (30 rows)
-    div  ecx                                ; EAX = band 0 (near) .. 3 (far)
+    mov  ecx, HORIZON                       ; divide by the floor height
+    div  ecx                                ; EAX = band 0 (near) .. 4 (far)
     pop  ecx                                ; ECX = row again
-    cmp  eax, 3                             ; past the last band?
-    jbe  FloorBandOK                        ; no
-    mov  eax, 3                             ; yes: farthest band
-FloorBandOK:
-    movzx eax, floorColors[eax]             ; EAX = floor colour for this band
+    mov  edx, column                        ; EDX = x
+    add  edx, ecx                           ; x + y: the dither pattern
+    cmp  eax, 0                             ; band 0?
+    je   FloorNear                          ; all near colour
+    cmp  eax, 1                             ; band 1?
+    jne  FloorBand2                         ; no
+    test edx, 3                             ; (x+y) mod 4 = 0?
+    jz   FloorFar                           ; 1 pixel in 4 far
+    jmp  FloorNear                          ; the rest near
+FloorBand2:
+    cmp  eax, 2                             ; band 2?
+    jne  FloorBand3                         ; no
+    test edx, 1                             ; checkerboard
+    jz   FloorFar                           ; half far
+    jmp  FloorNear                          ; half near
+FloorBand3:
+    cmp  eax, 3                             ; band 3?
+    jne  FloorFar                           ; no: band 4, all far
+    test edx, 3                             ; (x+y) mod 4 = 0?
+    jz   FloorNear                          ; 1 pixel in 4 near
+FloorFar:
+    mov  eax, C_FLOOR_FAR                   ; far colour
+    ret                                     ; back to caller
+FloorNear:
+    mov  eax, C_FLOOR_NEAR                  ; near colour
     ret                                     ; back to caller
 GetFloorPixel ENDP
 
@@ -1834,7 +1878,7 @@ PixelRow:
     jl   PixSky                             ; yes: sky
     cmp  ecx, wallBottom                    ; inside the wall? (signed)
     jl   PixWall                            ; yes: wall
-    call GetFloorPixel                      ; floor: EAX = colour for row ECX
+    INVOKE GetFloorPixel, ebx               ; floor: EAX = colour for (column, row ECX)
     jmp  PixStore                           ; store it
 PixSky:
     mov  eax, C_SKY                         ; dark sky
@@ -1862,7 +1906,8 @@ DrawPixelColumn ENDP
 ; Purpose:   What a column's wall slice shows:
 ;            edge line, exit door, key or plain wall.
 ; Receives:  column = pixel column, uses the column arrays
-; Returns:   EAX = KIND_EDGE, KIND_DOOR, KIND_KEY or KIND_BRICK
+; Returns:   EAX = KIND_EDGE, KIND_DOOR, KIND_KEY, KIND_BRICK or
+;            KIND_STONE
 ; Registers: EAX (EBX saved by USES)
 ;-------------------------------------------------------------
 GetColumnKind PROC USES ebx, column:DWORD
@@ -1877,7 +1922,11 @@ GetColumnKind PROC USES ebx, column:DWORD
     mov  eax, KIND_KEY                      ; assume a key
     cmp  colType[ebx], HIT_KEY              ; key?
     je   KindDone                           ; yes
-    mov  eax, KIND_BRICK                    ; plain wall
+    movzx ebx, hitCellCol[ebx]              ; EBX = map cell that was hit
+    mov  eax, KIND_STONE                    ; assume stone
+    cmp  gameMap[ebx], '%'                  ; stone wall?
+    je   KindDone                           ; yes
+    mov  eax, KIND_BRICK                    ; brick wall
 KindDone:
     ret                                     ; back to caller
 GetColumnKind ENDP
@@ -1885,15 +1934,18 @@ GetColumnKind ENDP
 ;-------------------------------------------------------------
 ; GetWallPixel
 ; Purpose:   Colour of one pixel of a wall slice.
-;            edge     -> darkest colour
-;            door/key -> blinking colour, dark outline on the
-;                        first and last row
-;            brick    -> outline on the first and last row,
-;                        otherwise brick texture:
-;                        texY = texRow * 32 / lineH (0..31),
+;            edge     -> darkest colour (1-pixel line)
+;            any slice: first and last row -> dark outline
+;            door/key -> blinking colour
+;            brick    -> texY = texRow * 32 / lineH (0..31):
 ;                        mortar row where texY mod 8 = 0,
 ;                        joint where (wallX + shift) mod 64 < 6,
-;                        shift = 32 on every second brick row.
+;                        shift = 32 on odd brick rows,
+;                        mortar two shades darker than the brick
+;            stone    -> big blocks (16 rows x 128 wide), shift
+;                        64 on odd rows, thin seams two shades
+;                        darker, every second block one shade
+;                        darker (slate look)
 ; Receives:  kind, level (0..3), wallX (0..255),
 ;            texRow (row inside the slice), lineH (pixels)
 ; Returns:   EAX = colour role
@@ -1916,30 +1968,64 @@ NotEdgePix:
     je   DoorPix                            ; yes
     cmp  kind, KIND_KEY                     ; key?
     je   KeyPix                             ; yes
-    ; ----- brick texture -----
+    ; ----- texture row: texY = texRow * 32 / lineH -----
     mov  eax, texRow                        ; EAX = row inside the slice
-    shl  eax, 5                             ; * 32 texture rows
+    imul eax, TEX_ROWS                      ; * 32 texture rows
     mov  edx, 0                             ; clear EDX before DIV
     div  lineH                              ; EAX = texY (0..31)
     mov  ecx, eax                           ; ECX = texY
+    cmp  kind, KIND_STONE                   ; stone wall?
+    je   StonePix                           ; yes
+    ; ----- blue brick -----
     and  eax, BRICK_ROW_H - 1               ; texY mod 8
     cmp  eax, 0                             ; mortar row?
-    je   MortarPix                          ; yes
+    je   BrickMortar                        ; yes
     mov  eax, 0                             ; EAX = shift, 0 on even brick rows
     test ecx, BRICK_ROW_H                   ; odd brick row? (bit 3 of texY)
     jz   HaveBrickShift                     ; no
-    mov  eax, BRICK_SHIFT                   ; yes: shift the joints by half a brick
+    mov  eax, BRICK_SHIFT                   ; yes: joints move by half a brick
 HaveBrickShift:
     add  eax, wallX                         ; wallX + shift
     and  eax, BRICK_W - 1                   ; mod 64
     cmp  eax, JOINT_W                       ; inside a joint?
-    jb   MortarPix                          ; yes
+    jb   BrickMortar                        ; yes
     mov  eax, level                         ; EAX = shade level
-    movzx eax, wallColors[eax]              ; brick colour
+    movzx eax, brickColors[eax]             ; brick colour
     ret                                     ; back to caller
-MortarPix:
+BrickMortar:
     mov  eax, level                         ; EAX = shade level
-    movzx eax, wallColors[eax + 1]          ; one shade darker
+    movzx eax, brickColors[eax + 2]         ; two shades darker
+    ret                                     ; back to caller
+    ; ----- slate stone -----
+StonePix:
+    and  eax, STONE_ROW_H - 1               ; texY mod 16
+    cmp  eax, 0                             ; seam row?
+    je   StoneSeam                          ; yes
+    mov  eax, 0                             ; EAX = shift, 0 on even block rows
+    test ecx, STONE_ROW_H                   ; odd block row? (bit 4 of texY)
+    jz   HaveStoneShift                     ; no
+    mov  eax, STONE_SHIFT                   ; yes: seams move by half a block
+HaveStoneShift:
+    add  eax, wallX                         ; wallX + shift (0..319)
+    mov  edx, eax                           ; EDX = shifted position
+    and  eax, STONE_W - 1                   ; mod 128
+    cmp  eax, SEAM_W                        ; inside a seam?
+    jb   StoneSeam                          ; yes
+    shr  edx, 7                             ; EDX = block number along the row
+    shr  ecx, 4                             ; ECX = block row number
+    add  edx, ecx                           ; block column + block row
+    and  edx, 1                             ; every second block ...
+    mov  eax, level                         ; EAX = shade level
+    add  eax, edx                           ; ... one shade darker
+    cmp  eax, 3                             ; past the farthest shade?
+    jbe  StoneShadeOK                       ; no
+    mov  eax, 3                             ; yes: farthest stone shade
+StoneShadeOK:
+    movzx eax, stoneColors[eax]             ; stone colour
+    ret                                     ; back to caller
+StoneSeam:
+    mov  eax, level                         ; EAX = shade level
+    movzx eax, stoneColors[eax + 2]         ; two shades darker
     ret                                     ; back to caller
 OutlinePix:
     mov  eax, OUTLINE_ATTR                  ; dark outline
@@ -2078,29 +2164,16 @@ CastAllRays ENDP
 
 ;-------------------------------------------------------------
 ; IsEdgeColumn
-; Purpose:   Decide if a column is an edge between walls:
-;            - it hit a different map cell than the column to
-;              its left, or a different side of the cell, or
-;            - the ray hit close to a cell corner
-;              (wallX < 20 or wallX > 236), only for walls under
-;              12 rows: up close one column covers so little of
-;              the wall that this test would draw a thick band.
-; Receives:  column = screen x (0..79), uses the column arrays
+; Purpose:   Decide if a pixel column is an edge between walls:
+;            it hit a different map cell than the column to its
+;            left, or a different side of the cell. Edge columns
+;            are drawn as a 1-pixel dark line.
+; Receives:  column = pixel column, uses the column arrays
 ; Returns:   EAX = 1 for an edge, 0 if not
 ; Registers: EAX (EBX, ESI saved by USES)
 ;-------------------------------------------------------------
 IsEdgeColumn PROC USES ebx esi, column:DWORD
     mov  ebx, column                        ; EBX = column
-    mov  eax, colDist[ebx*4]                ; EAX = distance of this column
-    call GetWallHeight                      ; EAX = wall height in rows
-    cmp  eax, EDGE_WALLX_H                  ; near wall (12 rows or more)?
-    jae  CheckNeighbour                     ; yes: one column covers too little wallX, skip the corner test
-    movzx eax, colWallX[ebx]                ; EAX = wallX of this column
-    cmp  eax, EDGE_LOW                      ; close to the cell's start?
-    jb   EdgeYes                            ; yes: corner line
-    cmp  eax, EDGE_HIGH                     ; close to the cell's end?
-    ja   EdgeYes                            ; yes: corner line
-CheckNeighbour:
     cmp  ebx, 0                             ; first column has no left neighbour
     je   EdgeNo                             ; so it is not an edge
     mov  esi, OFFSET hitCellCol             ; ESI = base of the cell array
