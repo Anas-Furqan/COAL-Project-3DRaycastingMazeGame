@@ -150,7 +150,7 @@ GameLoop    PROTO                           ; main loop, EAX = RESULT_QUIT / WIN
 
 ; ---------- movement settings ----------
 MOVE_SPEED = 32                             ; one step = 32/256 = 1/8 of a cell (Q8)
-TURN_STEP  = 5                              ; degrees turned per frame while A/D is held
+TURN_STEP  = 3                              ; degrees turned per frame while A/D is held (smooth turning)
 MARGIN     = 64                             ; keep 64/256 = 1/4 cell away from walls
 
 ; ---------- raycasting settings ----------
@@ -1331,12 +1331,12 @@ HandleInput PROC USES eax ecx edx
     INVOKE KeyDown, 'A'                     ; A held?
     cmp  eax, 0                             ; 0 = not held
     je   CheckD                             ; skip turning left
-    INVOKE TurnPlayer, -TURN_STEP           ; turn left 5 degrees
+    INVOKE TurnPlayer, -TURN_STEP           ; turn left TURN_STEP degrees
 CheckD:
     INVOKE KeyDown, 'D'                     ; D held?
     cmp  eax, 0                             ; 0 = not held
     je   CheckW                             ; skip turning right
-    INVOKE TurnPlayer, TURN_STEP            ; turn right 5 degrees
+    INVOKE TurnPlayer, TURN_STEP            ; turn right TURN_STEP degrees
 CheckW:
     INVOKE KeyDown, 'W'                     ; W held?
     cmp  eax, 0                             ; 0 = not held
