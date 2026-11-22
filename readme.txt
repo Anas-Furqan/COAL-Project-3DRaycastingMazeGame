@@ -12,6 +12,14 @@ and the wall distance decides how tall that column of wall is.
 All maths is integer fixed-point (Q8: value * 256); sine and cosine
 come from a 360-entry lookup table. No FPU or SSE instructions.
 
+Everything is drawn in colour: every frame has a character buffer and
+a colour buffer (80 x 25 each) that are written to the console row by
+row. Walls are solid blocks whose colour shows the distance (light
+cyan = near, then cyan, light blue, blue = far; one side of each wall
+is a shade darker). The sky is black with stars that move as you
+turn, the floor fades from yellow (near) through brown to dark gray.
+The exit door blinks red/yellow and keys blink yellow/white.
+
 HOW TO RUN (Visual Studio 2022)
 -------------------------------
 1. Install the Irvine32 library in C:\Irvine
@@ -45,8 +53,14 @@ CONTROLS
 
 GOAL
 ----
-You start in the top-left corner of the maze. Find the exit door
-(E on the minimap, a double-line wall in the 3D view) and walk into
-it before the 120-second timer runs out. The HUD on the bottom row
-shows the time left (mm:ss) and your step count. The win screen
-shows your time and steps; if the time runs out you lose.
+You start in the top-left corner of the maze. Three keys (K on the
+minimap, blinking yellow/white pillars in the 3D view) are hidden in
+the maze. Walk into a key to pick it up ("KEY FOUND! n/3"). The exit
+door (red E on the minimap, blinking red/yellow in the 3D view) stays
+locked until you have all 3 keys ("DOOR LOCKED - FIND 3 KEYS").
+With 3 keys, walk into the door before the 180-second timer runs out.
+
+The HUD on the bottom row shows the time left (mm:ss, turns red under
+20 seconds), your step count and KEYS n/3. The win screen shows your
+time, steps and keys; if the time runs out you lose. Playing again
+puts all keys back.
