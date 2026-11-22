@@ -14,10 +14,12 @@
 INCLUDE Irvine32.inc                        ; Irvine32 library procedures and Win32 prototypes
 
 ; ---------- constants (no memory used, just names for numbers) ----------
-SCREEN_W = 80                               ; console width in characters
-SCREEN_H = 24                               ; rows used by the 3D view
-BUF_H    = SCREEN_H + 1                     ; rows in frameBuffer: 24 view rows + 1 HUD row
-HUD_ROW  = SCREEN_H                         ; the HUD is the last row (row 24)
+VIEW_COLS       = 100                       ; width of the 3D view in console cells
+VIEW_ROWS_CELLS = 30                        ; height of the 3D view in console cells
+SCREEN_W = VIEW_COLS                        ; console width in characters
+SCREEN_H = VIEW_ROWS_CELLS                  ; rows used by the 3D view
+BUF_H    = SCREEN_H + 1                     ; rows in the frame: view rows + 1 HUD row
+HUD_ROW  = SCREEN_H                         ; the HUD is the last row
 MAP_W    = 16                               ; map width in cells
 MAP_H    = 16                               ; map height in cells
 FOV      = 60                               ; field of view in degrees
@@ -69,6 +71,14 @@ CSBI_EX ENDS
 GetConsoleScreenBufferInfoEx PROTO, hConsole:DWORD, lpInfo:PTR CSBI_EX ; EAX = 0 on failure
 SetConsoleScreenBufferInfoEx PROTO, hConsole:DWORD, lpInfo:PTR CSBI_EX ; EAX = 0 on failure
 
+; ---------- console window (kernel32 / user32, not in SmallWin.inc) ----------
+GetConsoleWindow PROTO                      ; EAX = window handle of the console
+GetWindowLongA   PROTO, hWnd:DWORD, nIndex:SDWORD                 ; EAX = window value (style)
+SetWindowLongA   PROTO, hWnd:DWORD, nIndex:SDWORD, dwNewLong:DWORD ; change a window value
+GWL_STYLE      = -16                        ; index of the window style
+WS_MAXIMIZEBOX = 00010000h                  ; style bit: maximize button
+WS_SIZEBOX     = 00040000h                  ; style bit: resizable border
+
 ; ---------- procedure prototypes ----------
 GetSin      PROTO                           ; EAX = angle in, EAX = sin*256 out
 GetCos      PROTO                           ; EAX = angle in, EAX = cos*256 out
@@ -86,6 +96,7 @@ LoseScreen  PROTO                           ; shows the "time's up" screen
 AskPlayAgain PROTO                          ; EAX = 1 for Y, 0 for N or Q
 ClearBuffer PROTO                           ; fills frameBuffer with spaces
 HideCursor  PROTO                           ; hides the blinking console cursor
+SetupWindow PROTO                           ; console buffer and window = exactly the game size
 LoadPalette PROTO                           ; saves the console palette, installs the blue/orange theme
 RestorePalette PROTO                        ; puts the saved palette back
 SetPalette  PROTO, infoPtr:PTR CSBI_EX      ; EAX = 1 if the palette in *infoPtr was applied
@@ -157,21 +168,22 @@ JOINT_W        = 8                          ; vertical joint width in wallX unit
 ; ---------- title / end screen layout (row, column on the console) ----------
 ART_LINES   = 5                             ; block letters are 5 rows tall
 BOX_LINES   = 10                            ; controls box: top, 8 text lines, bottom
-LOGO_ROW    = 1                             ; logo rows 1..5
-LOGO_COL    = 19                            ; (80 - 41) / 2: logo centred
-SUB_ROW     = 7                             ; subtitle row
-SUB_COL     = 19                            ; (80 - 41) / 2: subtitle centred
-BOX_ROW     = 9                             ; controls box rows 9..18
-BOX_COL     = 17                            ; (80 - 46) / 2: box centred
-PRESS_ROW   = 21                            ; blinking prompt row
-PRESS_COL   = 33                            ; (80 - 13) / 2: prompt centred
+TITLE_TOP   = (BUF_H - 22) / 2              ; title screen (22 rows) centred vertically
+LOGO_ROW    = TITLE_TOP                     ; logo: 5 rows
+LOGO_COL    = (SCREEN_W - 41) / 2           ; logo (41 wide) centred
+SUB_ROW     = TITLE_TOP + 6                 ; subtitle row
+SUB_COL     = (SCREEN_W - 41) / 2           ; subtitle (41 wide) centred
+BOX_ROW     = TITLE_TOP + 8                 ; controls box: 10 rows
+BOX_COL     = (SCREEN_W - 46) / 2           ; box (46 wide) centred
+PRESS_ROW   = TITLE_TOP + 20                ; blinking prompt row
+PRESS_COL   = (SCREEN_W - 13) / 2           ; prompt (13 wide) centred
 TITLE_DELAY = 50                            ; ms between title screen redraws
-BANNER_ROW  = 2                             ; end screen banner rows 2..6
-WIN_COL     = 16                            ; (80 - 47) / 2: "ESCAPED!" centred
-LOSE_COL    = 19                            ; (80 - 41) / 2: "TIME UP" centred
-INFO_ROW    = 9                             ; first line of time / steps
-INFO_COL    = 19                            ; column of the info lines
-ASK_ROW     = 13                            ; row of "Play again? (Y/N)"
+BANNER_ROW  = TITLE_TOP + 2                 ; end screen banner: 5 rows
+WIN_COL     = (SCREEN_W - 47) / 2           ; "ESCAPED!" (47 wide) centred
+LOSE_COL    = (SCREEN_W - 41) / 2           ; "TIME UP" (41 wide) centred
+INFO_ROW    = BANNER_ROW + 7                ; first line of time / steps
+INFO_COL    = LOSE_COL                      ; column of the info lines
+ASK_ROW     = INFO_ROW + 4                  ; row of "Play again? (Y/N)"
 
 ; ---------- minimap look ----------
 MAP_BOX       = MAP_H + 1                   ; border row/column on the far side (17)
@@ -263,6 +275,10 @@ themeColors DWORD RGB_SKY, RGB_WALL_3, RGB_WALL_2, RGB_WALL_1    ; slots 0-3
 origInfo    CSBI_EX <>                      ; the console settings found at start (restored at exit)
 themeInfo   CSBI_EX <>                      ; the same settings with the theme colours
 paletteOK   DWORD 0                         ; 1 if the theme palette was installed
+tinyRect    SMALL_RECT <0, 0, 0, 0>          ; 1x1 window, so the buffer can shrink
+gameRect    SMALL_RECT <0, 0, SCREEN_W - 1, BUF_H - 1> ; the window we want (inclusive corners)
+gameSize    COORD <SCREEN_W, BUF_H>         ; the buffer size we want
+windowOK    DWORD 0                         ; 1 if the window was set to the game size
 
 ; ---------- role -> console colour tables (index = role C_SKY .. C_WHITE) ----------
 ; The game always draws with roles. roleColors (the active table) turns a
@@ -446,6 +462,7 @@ main PROC
     INVOKE SetConsoleOutputCP, CODE_PAGE_437 ; show bytes 176..219 as block characters
     INVOKE HideCursor                       ; get console handle and hide the cursor
     INVOKE LoadPalette                      ; blue/orange theme (keeps standard colours if it fails)
+    INVOKE SetupWindow                      ; window = SCREEN_W x BUF_H (after the palette call)
     INVOKE InitInput                        ; get console input handle (for flushing keys)
     INVOKE TitleScreen                      ; show the title screen, EAX = key pressed
     and    al, 11011111b                    ; make the key uppercase
@@ -633,6 +650,41 @@ HideCursor PROC USES eax ecx edx
     INVOKE SetConsoleCursorInfo, consoleHandle, ADDR cursorInfo ; bVisible = 0 hides the cursor
     ret                                     ; back to caller
 HideCursor ENDP
+
+;-------------------------------------------------------------
+; SetupWindow
+; Purpose:   Make the console buffer and window exactly the game
+;            size (SCREEN_W x BUF_H), so no empty area is left:
+;            1. shrink the window to 1x1 (a buffer can never be
+;               smaller than its window),
+;            2. set the buffer size,
+;            3. set the window to the full buffer.
+;            Then remove the maximize button and the resizable
+;            border. If a call fails the game keeps running in
+;            whatever size the console has.
+; Receives:  nothing (consoleHandle must be set)
+; Returns:   windowOK = 1 on success
+; Registers: none (EAX, EBX saved by USES)
+;-------------------------------------------------------------
+SetupWindow PROC USES eax ebx
+    INVOKE SetConsoleWindowInfo, consoleHandle, 1, ADDR tinyRect ; step 1: tiny window
+    INVOKE SetConsoleScreenBufferSize, consoleHandle, gameSize   ; step 2: buffer = game size
+    cmp  eax, 0                             ; did it fail?
+    je   WindowDone                         ; yes: keep the console as it is
+    INVOKE SetConsoleWindowInfo, consoleHandle, 1, ADDR gameRect ; step 3: window = buffer
+    cmp  eax, 0                             ; did it fail?
+    je   WindowDone                         ; yes: keep running
+    mov  windowOK, 1                        ; the window now fits the game exactly
+    INVOKE GetConsoleWindow                 ; EAX = window handle (0 in some terminals)
+    cmp  eax, 0                             ; no real window?
+    je   WindowDone                         ; then leave the style alone
+    mov  ebx, eax                           ; EBX = window handle
+    INVOKE GetWindowLongA, ebx, GWL_STYLE   ; EAX = current window style
+    and  eax, NOT (WS_MAXIMIZEBOX OR WS_SIZEBOX) ; clear the maximize and resize bits
+    INVOKE SetWindowLongA, ebx, GWL_STYLE, eax   ; apply the new style
+WindowDone:
+    ret                                     ; back to caller
+SetupWindow ENDP
 
 ;-------------------------------------------------------------
 ; LoadPalette
