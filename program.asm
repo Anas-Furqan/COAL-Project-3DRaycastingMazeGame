@@ -429,18 +429,24 @@ GetMoveDelta ENDP
 ; IsWall
 ; Purpose:   Find out what kind of cell a Q8 position is in.
 ; Receives:  testX, testY = position in Q8 (cells * 256)
+;            (a position outside the 16x16 map counts as a wall)
 ; Returns:   EAX = CELL_WALL ('#'), CELL_EXIT ('E') or
 ;                  CELL_FREE (anything else)
-; Registers: EAX (EBX saved by USES)
+; Registers: EAX (EBX, ESI saved by USES)
 ;-------------------------------------------------------------
-IsWall PROC USES ebx, testX:SDWORD, testY:SDWORD
+IsWall PROC USES ebx esi, testX:SDWORD, testY:SDWORD
     mov  eax, testY                         ; EAX = Y in Q8
     sar  eax, 8                             ; EAX = row (whole cells)
+    cmp  eax, MAP_H - 1                     ; row above 15? (unsigned: a negative row is huge too)
+    ja   OutsideMap                         ; yes: outside the map
     shl  eax, 4                             ; EAX = row * 16 (start of that map row)
     mov  ebx, testX                         ; EBX = X in Q8
     sar  ebx, 8                             ; EBX = column (whole cells)
-    add  eax, ebx                           ; EAX = row*16 + col = index into gameMap
-    mov  bl, gameMap[eax]                   ; BL = the map character there
+    cmp  ebx, MAP_W - 1                     ; column above 15? (unsigned check)
+    ja   OutsideMap                         ; yes: outside the map
+    add  eax, ebx                           ; EAX = row*16 + col = index into gameMap (0..255)
+    mov  esi, OFFSET gameMap                ; ESI = base address of the map
+    mov  bl, [esi + eax]                    ; BL = map character (base-index addressing)
     mov  eax, CELL_WALL                     ; assume wall
     cmp  bl, '#'                            ; is it a wall?
     je   WallDone                           ; yes: return CELL_WALL
@@ -448,6 +454,9 @@ IsWall PROC USES ebx, testX:SDWORD, testY:SDWORD
     cmp  bl, 'E'                            ; is it the exit?
     je   WallDone                           ; yes: return CELL_EXIT
     mov  eax, CELL_FREE                     ; otherwise free floor
+    jmp  WallDone                           ; finished
+OutsideMap:
+    mov  eax, CELL_WALL                     ; outside the map: treat as a wall
 WallDone:
     ret                                     ; back to caller
 IsWall ENDP
