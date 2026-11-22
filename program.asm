@@ -64,10 +64,10 @@ AnyKeyDown  PROTO                           ; EAX = 1 if any keyboard key is hel
 WaitKeysReleased PROTO                      ; waits until keys are let go, sets mWasDown/qWasDown
 SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
 CastRay     PROTO, rayAngle:DWORD           ; EAX = distance (Q8), EDX = hitSide, ECX = 1 if exit
-GetWallChar PROTO, distance:DWORD, side:DWORD     ; EAX = shaded block character for a wall
+GetWallColor PROTO, distance:DWORD, side:DWORD    ; EAX = wall colour for a distance
 GetFloorChar PROTO                          ; ECX = row in, EAX = floor character for that row
 GetWallHeight PROTO                         ; EAX = distance in, EAX = wall height in rows
-DrawColumn  PROTO, column:DWORD, wallHeight:DWORD, wallChar:DWORD ; draws one screen column
+DrawColumn  PROTO, column:DWORD, wallHeight:DWORD, wallColor:DWORD ; draws one screen column
 RenderView  PROTO                           ; casts 80 rays and draws the 3D view
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
 HandleInput PROTO                           ; reads one key (no waiting) and acts on it
@@ -84,7 +84,9 @@ BIG_DIST   = 1000000                        ; "infinite" distance, used when a r
 KEY_WAIT_TRIES = 200                        ; max 200 x 10 ms = 2 s waiting for keys to be released
 CODE_PAGE_437  = 437                        ; old IBM PC character set (has the block characters)
 FLOOR_BAND     = 3                          ; each floor shade covers 3 rows
-EXIT_CHAR      = 186                        ; code page 437 double vertical line: the exit door
+WALL_CHAR      = 219                        ; code page 437 full block: every wall cell
+DOOR_COLOR_A   = lightRed + (black * 16)    ; exit door colour 1 (bright red)
+DOOR_COLOR_B   = yellow + (black * 16)      ; exit door colour 2 (yellow)
 DEFAULT_ATTR   = lightGray + (black * 16)   ; normal colour: light gray text on black
 
 ; ---------- cell types returned by IsWall ----------
@@ -185,7 +187,7 @@ sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
 shadeDist1  DWORD 512                       ; under 2 cells  -> level 0 (darkest/solid)
 shadeDist2  DWORD 1024                      ; under 4 cells  -> level 1
 shadeDist3  DWORD 2048                      ; under 8 cells  -> level 2, else level 3
-wallShades  BYTE 219, 178, 177, 176         ; code page 437: full block, dark, medium, light
+wallColors  BYTE lightCyan, cyan, lightBlue, blue  ; wall colours: nearest (brightest) first
 floorShades BYTE '#', 'x', '-', '.'         ; floor: nearest rows first
 
 ; ---------- screen drawing data ----------
@@ -982,17 +984,18 @@ DistOK:
 CastRay ENDP
 
 ;-------------------------------------------------------------
-; GetWallChar
-; Purpose:   Pick the wall block character for a distance.
-;            Closer = more solid. Y-side walls use one level
-;            lighter so corners and edges show up.
-;            level: 0 = 219, 1 = 178, 2 = 177, 3 = 176
+; GetWallColor
+; Purpose:   Pick the wall colour for a distance. Closer walls
+;            are brighter. Y-side walls use one level darker so
+;            corners and edges show up.
+;            level: 0 = light cyan, 1 = cyan, 2 = light blue,
+;                   3 = blue
 ; Receives:  distance = wall distance (Q8)
 ;            side     = hitSide from CastRay (0 or 1)
-; Returns:   EAX = block character (in AL)
+; Returns:   EAX = colour attribute (in AL)
 ; Registers: EAX only
 ;-------------------------------------------------------------
-GetWallChar PROC, distance:DWORD, side:DWORD
+GetWallColor PROC, distance:DWORD, side:DWORD
     mov  eax, distance                      ; EAX = distance
     cmp  eax, shadeDist1                    ; under 2 cells?
     jb   Level0                             ; yes
@@ -1011,14 +1014,14 @@ Level1:
 Level2:
     mov  eax, 2                             ; level 2
 AddSide:
-    add  eax, side                          ; Y-side: one level lighter (+1)
-    cmp  eax, 3                             ; past the lightest level?
+    add  eax, side                          ; Y-side: one level darker (+1)
+    cmp  eax, 3                             ; past the darkest level?
     jbe  HaveLevel                          ; no
-    mov  eax, 3                             ; yes: stay at the lightest
+    mov  eax, 3                             ; yes: stay at the darkest
 HaveLevel:
-    movzx eax, wallShades[eax]              ; EAX = block character for this level
+    movzx eax, wallColors[eax]              ; EAX = colour for this level
     ret                                     ; back to caller
-GetWallChar ENDP
+GetWallColor ENDP
 
 ;-------------------------------------------------------------
 ; GetFloorChar
@@ -1071,34 +1074,47 @@ GetWallHeight ENDP
 ;-------------------------------------------------------------
 ; DrawColumn
 ; Purpose:   Fill one screen column, top to bottom:
-;            ' ' (ceiling), wallChar (wall), shaded floor.
-;            The wall is centred vertically.
-; Receives:  column = screen x (0..79)
+;            ceiling, wall (solid block in wallColor), floor.
+;            The wall is centred vertically. Writes both the
+;            character (frameBuffer) and the colour (attrBuffer).
+; Receives:  column     = screen x (0..79)
 ;            wallHeight = wall size in rows (0..24)
-;            wallChar = character to draw the wall with
-; Returns:   nothing (frameBuffer changed)
-; Registers: none (EAX, EBX, ECX, EDX, EDI saved by USES)
+;            wallColor  = colour attribute of the wall
+; Returns:   nothing (frameBuffer, attrBuffer changed)
+; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-DrawColumn PROC USES eax ebx ecx edx edi, column:DWORD, wallHeight:DWORD, wallChar:DWORD
+DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD, wallHeight:DWORD, wallColor:DWORD
     mov  ebx, SCREEN_H                      ; EBX = 24
     sub  ebx, wallHeight                    ; rows not used by the wall
     shr  ebx, 1                             ; half above: EBX = first wall row
     mov  edx, ebx                           ; EDX = first wall row
     add  edx, wallHeight                    ; EDX = first floor row
-    mov  edi, OFFSET frameBuffer            ; EDI = row 0 of the buffer
+    mov  edi, OFFSET frameBuffer            ; EDI = row 0 of the character buffer
     add  edi, column                        ; move to this column
+    mov  esi, column                        ; ESI = column
+    shl  esi, 1                             ; column * 2 (each colour is a WORD)
+    add  esi, OFFSET attrBuffer             ; ESI = this column in row 0 of the colours
     mov  ecx, 0                             ; ECX = row, start at 0
 ColumnRow:
-    mov  al, ' '                            ; assume ceiling
     cmp  ecx, ebx                           ; above the wall?
-    jb   PutChar                            ; yes: ceiling
-    mov  eax, wallChar                      ; assume wall (shaded block in AL)
+    jb   PutCeiling                         ; yes: ceiling
     cmp  ecx, edx                           ; still inside the wall?
-    jb   PutChar                            ; yes: wall
+    jb   PutWall                            ; yes: wall
     call GetFloorChar                       ; otherwise floor: AL = shade for row ECX
-PutChar:
-    mov  [edi], al                          ; write the character
-    add  edi, SCREEN_W                      ; down one row (80 bytes)
+    mov  [edi], al                          ; write the floor character
+    mov  WORD PTR [esi], DEFAULT_ATTR       ; normal colour
+    jmp  NextRow                            ; done with this row
+PutCeiling:
+    mov  BYTE PTR [edi], ' '                ; empty ceiling
+    mov  WORD PTR [esi], DEFAULT_ATTR       ; normal colour
+    jmp  NextRow                            ; done with this row
+PutWall:
+    mov  BYTE PTR [edi], WALL_CHAR          ; solid block
+    mov  eax, wallColor                     ; AX = wall colour
+    mov  [esi], ax                          ; store the colour
+NextRow:
+    add  edi, SCREEN_W                      ; down one row of characters (80 bytes)
+    add  esi, SCREEN_W * 2                  ; down one row of colours (160 bytes)
     inc  ecx                                ; next row number
     cmp  ecx, SCREEN_H                      ; all 24 rows done?
     jb   ColumnRow                          ; no: next row
@@ -1110,7 +1126,7 @@ DrawColumn ENDP
 ; Purpose:   Draw the 3D view: one ray per screen column.
 ;            rayAngle = angle - FOV/2 + x*FOV/SCREEN_W
 ; Receives:  nothing (uses angle, posX, posY)
-; Returns:   nothing (frameBuffer filled)
+; Returns:   nothing (frameBuffer, attrBuffer filled)
 ; Registers: none (EAX, EBX, ECX, EDX saved by USES)
 ;-------------------------------------------------------------
 RenderView PROC USES eax ebx ecx edx
@@ -1127,13 +1143,13 @@ ViewColumn:
     INVOKE CastRay, eax                     ; EAX = distance, EDX = hitSide, ECX = exit?
     push eax                                ; keep the distance for the height
     cmp  ecx, 1                             ; did the ray hit the exit door?
-    je   ExitColumn                         ; yes: use the door character
-    INVOKE GetWallChar, eax, edx            ; no: EAX = shaded wall character
-    mov  ecx, eax                           ; ECX = wall character
-    jmp  HaveWallChar                       ; character chosen
+    je   ExitColumn                         ; yes: use the door colour
+    INVOKE GetWallColor, eax, edx           ; no: EAX = wall colour for this distance
+    mov  ecx, eax                           ; ECX = wall colour
+    jmp  HaveWallColor                      ; colour chosen
 ExitColumn:
-    mov  ecx, EXIT_CHAR                     ; ECX = double line: the exit door
-HaveWallChar:
+    mov  ecx, DOOR_COLOR_A                  ; ECX = door colour
+HaveWallColor:
     pop  eax                                ; EAX = distance again
     call GetWallHeight                      ; EAX = wall height in rows
     INVOKE DrawColumn, ebx, eax, ecx        ; draw this column
