@@ -1,6 +1,5 @@
 ; ------------------------------------------------------------
 ; WOLF-86 - 3D Raycasting Maze Game
-; Author:   Saif Nawaz
 ; Course:   EL-2003 COAL Lab, Fall 2026
 ; Language: 32-bit x86 assembly (MASM) + Irvine32 library
 ;
