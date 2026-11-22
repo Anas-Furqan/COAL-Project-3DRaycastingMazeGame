@@ -226,6 +226,8 @@ main PROC
 NewGame:
     INVOKE WaitKeysReleased                 ; the last key pressed can't trigger M or Q
     INVOKE ResetGame                        ; start position, angle, steps, timer
+    mov    eax, lightGray + (black * 16)    ; normal colours (win/lose screens used green/red)
+    call   SetTextColor                     ; Clrscr paints every cell with this colour
     call   Clrscr                           ; clean screen for the game
     INVOKE GameLoop                         ; play; EAX = how the game ended
     cmp    eax, RESULT_QUIT                 ; pressed Q?
@@ -241,6 +243,8 @@ AskAgain:
     cmp    eax, 1                           ; play again?
     je     NewGame                          ; yes: start a new game
 QuitProgram:
+    mov    eax, lightGray + (black * 16)    ; normal colours for the console we leave behind
+    call   SetTextColor                     ; apply them
     call   Clrscr                           ; leave a clean console behind
     INVOKE ExitProcess, 0                   ; end the program with exit code 0
 main ENDP
