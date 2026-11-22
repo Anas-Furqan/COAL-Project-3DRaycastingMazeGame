@@ -884,7 +884,8 @@ CastRay PROC USES ebx esi edi, rayAngle:DWORD
     mov  stepY, ecx                         ; save step Y
 
     ; ----- block 3: step cell by cell until a wall or the exit -----
-    ; (the map has walls all round, so this always ends)
+    ; (the map has walls all round, so this always ends;
+    ;  the bounds check is an extra safety net)
 DDALoop:
     mov  eax, sideX                         ; EAX = distance to next X line
     cmp  eax, sideY                         ; is the X line closer than the Y line?
@@ -902,6 +903,10 @@ StepInY:
     add  mapY, eax                          ; move one cell up/down
     mov  hitSide, 1                         ; we crossed a Y line
 CheckCell:
+    cmp  mapX, MAP_W - 1                    ; column outside 0..15? (unsigned check)
+    ja   RayHit                             ; yes: stop, never read past the map
+    cmp  mapY, MAP_H - 1                    ; row outside 0..15? (unsigned check)
+    ja   RayHit                             ; yes: stop, never read past the map
     mov  eax, mapY                          ; EAX = row
     shl  eax, 4                             ; row * 16
     add  eax, mapX                          ; row*16 + col
