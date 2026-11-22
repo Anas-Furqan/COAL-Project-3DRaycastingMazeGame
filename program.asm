@@ -22,7 +22,7 @@ BUF_H    = SCREEN_H + 1                     ; rows in the frame: view rows + 1 H
 HUD_ROW  = SCREEN_H                         ; the HUD is the last row
 MAP_W    = 16                               ; map width in cells
 MAP_H    = 16                               ; map height in cells
-FOV      = 60                               ; field of view in degrees
+FOV      = 66                               ; field of view in degrees
 
 ; ---------- colour attributes = palette slot (background slot 0 = near-black sky) ----------
 C_SKY        = 0                            ; sky / background, edge lines
@@ -124,7 +124,10 @@ ComposeFrame PROTO                          ; pixels + text -> CHAR_INFO buffer 
 WriteConsoleOutputA PROTO, hConsole:DWORD, lpBuffer:PTR DWORD, dwBufferSize:COORD, dwBufferCoord:COORD, lpWriteRegion:PTR SMALL_RECT ; (kernel32) draw a block of CHAR_INFO cells
 GetMoveDelta PROTO                          ; returns EAX = dx, EDX = dy for one step forward
 IsWall      PROTO, testX:SDWORD, testY:SDWORD     ; EAX = CELL_FREE / CELL_WALL / CELL_EXIT
-ProbePoint  PROTO, newPos:SDWORD, delta:SDWORD    ; EAX = newPos pushed MARGIN further in move direction
+BoxCheck    PROTO, testX:SDWORD, testY:SDWORD ; EAX = what the player's box touches at (x, y)
+CenterAssist PROTO                          ; nudges the player to the corridor centre
+CenterNudge PROTO, axisPos:SDWORD            ; EAX = step towards the cell centre (-4..4)
+GetTurnSpeed PROTO                          ; EAX = degrees to turn this frame (2..5)
 TryMove     PROTO, moveDX:SDWORD, moveDY:SDWORD   ; moves the player if no wall is in the way
 HandleCell  PROTO, cellType:DWORD, testX:SDWORD, testY:SDWORD ; exit / key touched by a probe
 CollectKey  PROTO, testX:SDWORD, testY:SDWORD     ; removes the key there, keys++, message
@@ -162,14 +165,17 @@ GameLoop    PROTO                           ; main loop, EAX = RESULT_QUIT / WIN
 
 ; ---------- movement settings ----------
 MOVE_SPEED = 32                             ; one step = 32/256 = 1/8 of a cell (Q8)
-TURN_STEP  = 3                              ; degrees turned per frame while A/D is held (smooth turning)
-MARGIN     = 64                             ; keep 64/256 = 1/4 cell away from walls
+PLAYER_R   = 80                             ; collision box half-size: 80/256 = 0.31 cell
+CELL_SIZE  = 256                            ; one map cell in Q8
+NUDGE_MAX  = 4                              ; corridor centering: at most 4 Q8 units per frame
+TURN_RAMP_LEN = 10                          ; entries in turnRamp
 
 ; ---------- raycasting settings ----------
 BIG_DIST   = 1000000                        ; "infinite" distance, used when a ray never crosses an axis
 KEY_WAIT_TRIES = 200                        ; max 200 x 10 ms = 2 s waiting for keys to be released
 CODE_PAGE_437  = 437                        ; old IBM PC character set (has the block characters)
 PIX_W          = VIEW_COLS                  ; pixel columns of the 3D view (one ray each)
+MIN_WALL_DIST  = 64                         ; distance used for wall height is at least 1/4 cell
 PIX_H          = VIEW_ROWS_CELLS * 2        ; pixel rows: two pixels per console cell
 HORIZON        = PIX_H / 2                  ; pixel row of the horizon
 HALF_BLOCK     = 223                        ; code page 437 upper half block
@@ -183,7 +189,7 @@ WALL_CHAR      = 219                        ; code page 437 full block: every wa
 STAR_CHAR      = '.'                        ; a star in the night sky
 STAR_ATTR      = C_STONE_3                  ; stars: dim grey-violet
 STAR_MOD       = 61                         ; star if (rayAngle*7 + row*13) mod 61 = 0 (few stars)
-PLANE_LEN      = 148                        ; tan(30 degrees) * 256: half-width of the camera plane
+PLANE_LEN      = 166                        ; tan(33 degrees) * 256: half-width of the camera plane (FOV 66)
 TEX_ROWS       = 32                         ; texture rows per wall cell (texY = 0..31)
 BRICK_ROW_H    = 8                          ; brick height in texture rows (4 brick rows per cell)
 BRICK_W        = 64                         ; brick width in wallX units (4 bricks per cell)
@@ -417,6 +423,10 @@ wonFlag     BYTE 0                          ; becomes 1 when the player touches 
 mWasDown    BYTE 0                          ; 1 if M was held last frame (for single press)
 qWasDown    BYTE 0                          ; 1 if Q was held last frame (for single press)
 inputHandle DWORD ?                         ; console input handle (set by InitInput)
+boxHitX     SDWORD 0                        ; BoxCheck: corner that touched something (X)
+boxHitY     SDWORD 0                        ; BoxCheck: corner that touched something (Y)
+turnHold    DWORD 0                         ; frames A or D has been held (turn acceleration)
+turnRamp    BYTE 2, 2, 2, 3, 3, 3, 4, 4, 4, 5 ; degrees per frame while A/D is held
 blinkOn     DWORD 0                         ; 0 / 1, flips every 500 ms (door, keys, title text)
 
 ; ---------- per-column ray results (filled by CastAllRays, used by DrawColumn) ----------
@@ -1366,51 +1376,73 @@ WallDone:
 IsWall ENDP
 
 ;-------------------------------------------------------------
-; ProbePoint
-; Purpose:   Give the point to test for walls: the new position
-;            plus MARGIN further in the direction of movement.
-; Receives:  newPos = new X or Y (Q8), delta = movement (+ or -)
-; Returns:   EAX = newPos + MARGIN (delta > 0) or
-;                  newPos - MARGIN (delta < 0)
-; Registers: EAX only
+; BoxCheck
+; Purpose:   Test the player's collision box at a Q8 position:
+;            a square with half-size PLAYER_R, so all 4 corners
+;            (x +- R, y +- R) are tested against the map. The
+;            player can then never get closer than R to a wall,
+;            also at corners. A key or the exit is reported
+;            before a plain wall, so it is never missed.
+; Receives:  testX, testY = box centre (Q8)
+; Returns:   EAX = CELL_FREE, CELL_WALL, CELL_EXIT or CELL_KEY
+;            boxHitX, boxHitY = the corner that touched it
+; Registers: EAX (EBX, ECX, EDX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-ProbePoint PROC, newPos:SDWORD, delta:SDWORD
-    mov  eax, newPos                        ; EAX = the new position
-    cmp  delta, 0                           ; moving in the negative direction?
-    jl   ProbeNeg                           ; yes
-    add  eax, MARGIN                        ; no: look a bit further ahead (+)
-    jmp  ProbeDone                          ; finished
-ProbeNeg:
-    sub  eax, MARGIN                        ; look a bit further ahead (-)
-ProbeDone:
+BoxCheck PROC USES ebx ecx edx esi edi, testX:SDWORD, testY:SDWORD
+    mov  ebx, CELL_FREE                     ; EBX = result so far
+    mov  esi, -PLAYER_R                     ; ESI = corner offset in X (-R, then +R)
+BoxX:
+    mov  edi, -PLAYER_R                     ; EDI = corner offset in Y (-R, then +R)
+BoxY:
+    mov  ecx, testX                         ; ECX = corner X
+    add  ecx, esi                           ; testX +- R
+    mov  edx, testY                         ; EDX = corner Y
+    add  edx, edi                           ; testY +- R
+    INVOKE IsWall, ecx, edx                 ; EAX = what is at this corner
+    cmp  eax, CELL_FREE                     ; free?
+    je   NextCorner                         ; yes: nothing to report
+    cmp  ebx, CELL_FREE                     ; first thing found?
+    je   TakeCorner                         ; yes: report it
+    cmp  eax, CELL_WALL                     ; only another wall?
+    je   NextCorner                         ; yes: keep the first one
+TakeCorner:
+    mov  ebx, eax                           ; remember the cell type
+    mov  boxHitX, ecx                       ; and the corner that touched it
+    mov  boxHitY, edx                       ; (CollectKey needs a point in the key cell)
+NextCorner:
+    add  edi, PLAYER_R * 2                  ; next Y offset: -R -> +R
+    cmp  edi, PLAYER_R                      ; both Y offsets done? (signed)
+    jle  BoxY                               ; no: test the other one
+    add  esi, PLAYER_R * 2                  ; next X offset: -R -> +R
+    cmp  esi, PLAYER_R                      ; both X offsets done? (signed)
+    jle  BoxX                               ; no: test the other column
+    mov  eax, ebx                           ; EAX = result
     ret                                     ; back to caller
-ProbePoint ENDP
+BoxCheck ENDP
 
 ;-------------------------------------------------------------
 ; TryMove
-; Purpose:   Move the player by (moveDX, moveDY) if no wall is
-;            within MARGIN of the new position. X and Y are
+; Purpose:   Move the player by (moveDX, moveDY) if the whole
+;            collision box (BoxCheck) stays free. X and Y are
 ;            checked separately so the player slides along
-;            walls. steps++ if it moved. A probe touching the
+;            walls. steps++ if it moved. A box touching the
 ;            exit or a key is handled by HandleCell (exit and
 ;            keys block like walls).
 ; Receives:  moveDX, moveDY = movement in Q8
 ; Returns:   posX, posY, steps (and via HandleCell: keys,
 ;            wonFlag, message) updated
-; Registers: none (EAX, ECX, EDX, ESI saved by USES)
+; Registers: none (EAX, ECX, EDX saved by USES)
 ;-------------------------------------------------------------
-TryMove PROC USES eax ecx edx esi, moveDX:SDWORD, moveDY:SDWORD
+TryMove PROC USES eax ecx edx, moveDX:SDWORD, moveDY:SDWORD
     mov  ecx, 0                             ; ECX = 1 once we really move
     cmp  moveDX, 0                          ; any X movement at all?
     je   TryY                               ; no: skip the X test
     mov  edx, posX                          ; EDX = current X
     add  edx, moveDX                        ; EDX = new X
-    INVOKE ProbePoint, edx, moveDX          ; EAX = new X + margin ahead
-    mov  esi, eax                           ; ESI = probe X
-    INVOKE IsWall, esi, posY                ; that point with OLD Y: what cell?
-    INVOKE HandleCell, eax, esi, posY       ; exit or key touched? (EAX kept)
-    cmp  eax, CELL_FREE                     ; free floor?
-    jne  TryY                               ; wall, exit or key: do not move in X
+    INVOKE BoxCheck, edx, posY              ; box at the new X, old Y: what does it touch?
+    INVOKE HandleCell, eax, boxHitX, boxHitY ; exit or key touched? (EAX kept)
+    cmp  eax, CELL_FREE                     ; box completely free?
+    jne  TryY                               ; no: do not move in X
     mov  posX, edx                          ; free: accept the new X
     mov  ecx, 1                             ; remember that we moved
 TryY:
@@ -1418,12 +1450,10 @@ TryY:
     je   MoveDone                           ; no: skip the Y test
     mov  edx, posY                          ; EDX = current Y
     add  edx, moveDY                        ; EDX = new Y
-    INVOKE ProbePoint, edx, moveDY          ; EAX = new Y + margin ahead
-    mov  esi, eax                           ; ESI = probe Y
-    INVOKE IsWall, posX, esi                ; (maybe new) X with that Y: what cell?
-    INVOKE HandleCell, eax, posX, esi       ; exit or key touched? (EAX kept)
-    cmp  eax, CELL_FREE                     ; free floor?
-    jne  MoveDone                           ; wall, exit or key: do not move in Y
+    INVOKE BoxCheck, posX, edx              ; box at the (maybe new) X, new Y
+    INVOKE HandleCell, eax, boxHitX, boxHitY ; exit or key touched? (EAX kept)
+    cmp  eax, CELL_FREE                     ; box completely free?
+    jne  MoveDone                           ; no: do not move in Y
     mov  posY, edx                          ; free: accept the new Y
     mov  ecx, 1                             ; remember that we moved
 MoveDone:
@@ -1433,6 +1463,114 @@ MoveDone:
 NoStep:
     ret                                     ; back to caller
 TryMove ENDP
+
+;-------------------------------------------------------------
+; CenterAssist
+; Purpose:   Corridor centering while W or S is held: if the
+;            player moves mostly along X and the cells above and
+;            below are walls (a corridor), Y is nudged towards
+;            the cell centre by offset/8 (at most 4 Q8 units per
+;            frame); the same for movement along Y with X.
+;            Turning at a junction then lines up with the next
+;            corridor.
+; Receives:  nothing (uses posX, posY, angle)
+; Returns:   posX or posY may change slightly
+; Registers: none (EAX, EBX, ECX, EDX saved by USES)
+;-------------------------------------------------------------
+CenterAssist PROC USES eax ebx ecx edx
+    mov  eax, angle                         ; EAX = facing angle
+    call GetCos                             ; EAX = cos * 256
+    mov  ebx, eax                           ; EBX = cos
+    cmp  ebx, 0                             ; negative? (signed)
+    jge  CosAbs                             ; no
+    neg  ebx                                ; EBX = |cos|
+CosAbs:
+    mov  eax, angle                         ; EAX = facing angle
+    call GetSin                             ; EAX = sin * 256
+    cmp  eax, 0                             ; negative? (signed)
+    jge  SinAbs                             ; no
+    neg  eax                                ; EAX = |sin|
+SinAbs:
+    cmp  ebx, eax                           ; |cos| >= |sin| ?
+    jb   AlongY                             ; no: moving mostly along Y
+    ; ----- moving along X: corridor walls above and below? -----
+    mov  ecx, posY                          ; ECX = Y
+    sub  ecx, CELL_SIZE                     ; one cell up
+    INVOKE IsWall, posX, ecx                ; what is above?
+    cmp  eax, CELL_FREE                     ; open above?
+    je   AssistDone                         ; yes: not a corridor
+    mov  ecx, posY                          ; ECX = Y
+    add  ecx, CELL_SIZE                     ; one cell down
+    INVOKE IsWall, posX, ecx                ; what is below?
+    cmp  eax, CELL_FREE                     ; open below?
+    je   AssistDone                         ; yes: not a corridor
+    INVOKE CenterNudge, posY                ; EAX = small step towards the centre
+    add  posY, eax                          ; nudge Y
+    jmp  AssistDone                         ; finished
+AlongY:
+    ; ----- moving along Y: corridor walls left and right? -----
+    mov  ecx, posX                          ; ECX = X
+    sub  ecx, CELL_SIZE                     ; one cell left
+    INVOKE IsWall, ecx, posY                ; what is left?
+    cmp  eax, CELL_FREE                     ; open on the left?
+    je   AssistDone                         ; yes: not a corridor
+    mov  ecx, posX                          ; ECX = X
+    add  ecx, CELL_SIZE                     ; one cell right
+    INVOKE IsWall, ecx, posY                ; what is right?
+    cmp  eax, CELL_FREE                     ; open on the right?
+    je   AssistDone                         ; yes: not a corridor
+    INVOKE CenterNudge, posX                ; EAX = small step towards the centre
+    add  posX, eax                          ; nudge X
+AssistDone:
+    ret                                     ; back to caller
+CenterAssist ENDP
+
+;-------------------------------------------------------------
+; CenterNudge
+; Purpose:   Step towards the centre of the current cell on one
+;            axis: (centre - pos) / 8, limited to -4..+4.
+; Receives:  axisPos = position on this axis (Q8)
+; Returns:   EAX = nudge (signed Q8)
+; Registers: EAX only
+;-------------------------------------------------------------
+CenterNudge PROC, axisPos:SDWORD
+    mov  eax, axisPos                       ; EAX = position
+    and  eax, NOT (CELL_SIZE - 1)           ; start of this cell
+    add  eax, CELL_SIZE / 2                 ; centre of this cell
+    sub  eax, axisPos                       ; offset to the centre (signed)
+    sar  eax, 3                             ; / 8 (SAR keeps the sign)
+    cmp  eax, NUDGE_MAX                     ; too far right/down? (signed)
+    jle  NudgeNotBig                        ; no
+    mov  eax, NUDGE_MAX                     ; yes: limit
+NudgeNotBig:
+    cmp  eax, -NUDGE_MAX                    ; too far left/up? (signed)
+    jge  NudgeDone                          ; no
+    mov  eax, -NUDGE_MAX                    ; yes: limit
+NudgeDone:
+    ret                                     ; back to caller
+CenterNudge ENDP
+
+;-------------------------------------------------------------
+; GetTurnSpeed
+; Purpose:   Turn acceleration: the longer A/D is held, the
+;            faster the turn. turnHold counts frames:
+;            frames 1-3: 2 deg, 4-6: 3, 7-9: 4, then 5 per frame
+;            (about 0.3 s to full speed). A short tap turns
+;            finely.
+; Receives:  nothing (uses turnHold)
+; Returns:   EAX = degrees for this frame
+; Registers: EAX only
+;-------------------------------------------------------------
+GetTurnSpeed PROC
+    mov  eax, turnHold                      ; EAX = frames A/D has been held
+    dec  eax                                ; 0-based
+    cmp  eax, TURN_RAMP_LEN - 1             ; past the ramp?
+    jbe  RampIndexOK                        ; no
+    mov  eax, TURN_RAMP_LEN - 1             ; yes: last entry (full speed)
+RampIndexOK:
+    movzx eax, turnRamp[eax]                ; degrees for this frame
+    ret                                     ; back to caller
+GetTurnSpeed ENDP
 
 ;-------------------------------------------------------------
 ; HandleCell
@@ -1721,31 +1859,49 @@ KeyPressed ENDP
 
 ;-------------------------------------------------------------
 ; HandleInput
-; Purpose:   Check the keys every frame. Held keys: A/D turn,
-;            W/S move (they can combine, e.g. W+A). Single
+; Purpose:   Check the keys every frame. Held keys: A/D turn
+;            (accelerating, GetTurnSpeed), W/S move with
+;            corridor centering (they can combine, e.g. W+A). Single
 ;            presses: M toggles minimap, Q quits. Old console
 ;            key events are thrown away so they don't pile up.
 ; Receives:  nothing
 ; Returns:   posX/posY/angle/showMinimap/quitFlag may change
-; Registers: none (EAX, ECX, EDX saved by USES)
+; Registers: none (EAX, EBX, ECX, EDX saved by USES)
 ;-------------------------------------------------------------
-HandleInput PROC USES eax ecx edx
+HandleInput PROC USES eax ebx ecx edx
     INVOKE FlushConsoleInputBuffer, inputHandle ; drop waiting key events
+    ; ----- turn acceleration: count frames while A or D is held -----
+    INVOKE KeyDown, 'A'                     ; A held?
+    mov  ebx, eax                           ; EBX = A state
+    INVOKE KeyDown, 'D'                     ; D held?
+    or   eax, ebx                           ; A or D held?
+    jnz  TurnHeld                           ; yes
+    mov  turnHold, 0                        ; no: next turn starts slowly again
+    jmp  CheckA                             ; go on
+TurnHeld:
+    cmp  turnHold, TURN_RAMP_LEN            ; already at full speed?
+    jae  CheckA                             ; yes: stop counting
+    inc  turnHold                           ; one more frame held
+CheckA:
     INVOKE KeyDown, 'A'                     ; A held?
     cmp  eax, 0                             ; 0 = not held
     je   CheckD                             ; skip turning left
-    INVOKE TurnPlayer, -TURN_STEP           ; turn left TURN_STEP degrees
+    call GetTurnSpeed                       ; EAX = degrees this frame
+    neg  eax                                ; left = negative
+    INVOKE TurnPlayer, eax                  ; turn left
 CheckD:
     INVOKE KeyDown, 'D'                     ; D held?
     cmp  eax, 0                             ; 0 = not held
     je   CheckW                             ; skip turning right
-    INVOKE TurnPlayer, TURN_STEP            ; turn right TURN_STEP degrees
+    call GetTurnSpeed                       ; EAX = degrees this frame
+    INVOKE TurnPlayer, eax                  ; turn right
 CheckW:
     INVOKE KeyDown, 'W'                     ; W held?
     cmp  eax, 0                             ; 0 = not held
     je   CheckS                             ; skip moving forward
     call GetMoveDelta                       ; EAX = dx, EDX = dy
     INVOKE TryMove, eax, edx                ; move forward if possible
+    call CenterAssist                       ; drift towards the corridor centre
 CheckS:
     INVOKE KeyDown, 'S'                     ; S held?
     cmp  eax, 0                             ; 0 = not held
@@ -1754,6 +1910,7 @@ CheckS:
     neg  eax                                ; reverse X direction
     neg  edx                                ; reverse Y direction
     INVOKE TryMove, eax, edx                ; move backward if possible
+    call CenterAssist                       ; drift towards the corridor centre
 CheckM:
     INVOKE KeyPressed, 'M', ADDR mWasDown   ; M newly pressed?
     cmp  eax, 0                             ; 0 = no new press
@@ -2255,6 +2412,10 @@ DrawPixelColumn PROC USES eax ebx ecx edx edi, column:DWORD
     movzx eax, colWallX[ebx]                ; position along the wall
     mov  wallX, eax                         ; keep it for the texture
     mov  eax, colDist[ebx*4]                ; EAX = perpendicular distance
+    cmp  eax, MIN_WALL_DIST                 ; closer than 1/4 cell?
+    jae  DistForHeightOK                    ; no
+    mov  eax, MIN_WALL_DIST                 ; yes: limit, walls never get absurdly tall
+DistForHeightOK:
     call GetWallHeight                      ; EAX = height in pixels
     mov  lineH, eax                         ; keep it
     sar  eax, 1                             ; half the height
