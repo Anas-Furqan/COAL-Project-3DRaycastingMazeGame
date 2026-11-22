@@ -234,13 +234,13 @@ HUD_KEYS_LEN   = 8                          ; "KEYS n/3" is 8 characters
 
 ; ---------- theme colours: COLORREF = 00BBGGRRh (web #RRGGBB written backwards) ----------
 RGB_SKY        = 001A0E0Ah                  ; slot 0  sky / background   #0A0E1A
-RGB_WALL_3     = 006E2A2Ah                  ; slot 1  wall level 3 (far) #2A2A6E blue-violet
-RGB_WALL_2     = 00B04F3Fh                  ; slot 2  wall level 2       #3F4FB0
-RGB_WALL_1     = 00E07F5Bh                  ; slot 3  wall level 1       #5B7FE0
-RGB_WALL_0     = 00FFB48Ah                  ; slot 4  wall level 0 (near)#8AB4FF
-RGB_FLOOR_FAR  = 001D1614h                  ; slot 5  floor far          #14161D
-RGB_FLOOR_MID  = 002A211Eh                  ; slot 6  floor mid          #1E212A
-RGB_FLOOR_NEAR = 003A2F2Bh                  ; slot 8  floor near / stars #2B2F3A
+RGB_WALL_3     = 00A85444h                  ; slot 1  wall level 3 (far) #4454A8
+RGB_WALL_2     = 00D0725Ah                  ; slot 2  wall level 2       #5A72D0
+RGB_WALL_1     = 00F09C7Ch                  ; slot 3  wall level 1       #7C9CF0
+RGB_WALL_0     = 00FFC6A9h                  ; slot 4  wall level 0 (near)#A9C6FF
+RGB_FLOOR_FAR  = 001E1714h                  ; slot 5  floor far          #14171E
+RGB_FLOOR_MID  = 0029201Ch                  ; slot 6  floor mid          #1C2029
+RGB_FLOOR_NEAR = 00382B26h                  ; slot 8  floor near / stars #262B38 dark slate
 RGB_MAP_WALL   = 007A4034h                  ; slot 9  minimap walls      #34407A
 RGB_DOOR_A     = 002B6AFFh                  ; slot 10 door A             #FF6A2B red-orange
 RGB_DOOR_B     = 0047B3FFh                  ; slot 11 door B / accent    #FFB347 yellow-orange
@@ -269,7 +269,7 @@ paletteOK   DWORD 0                         ; 1 if the theme palette was install
 ; number IS the palette slot; without it, standard colours that keep the
 ; blue / orange look are used instead.
 customRoles   BYTE 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ; custom palette: role = slot
-fallbackRoles BYTE black, gray, gray, blue          ; sky, wall far, wall, wall
+fallbackRoles BYTE black, blue, blue, blue          ; sky/edges, wall far, wall, wall
               BYTE lightBlue, black, black, lightGray ; wall near, floor far, floor mid, text
               BYTE gray, blue, lightRed, yellow     ; floor near/stars, map walls, door A, door B/accent
               BYTE yellow, lightRed, gray, white    ; gold, danger, outline, white
