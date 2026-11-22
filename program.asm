@@ -83,6 +83,8 @@ GetConsoleWindow PROTO                      ; EAX = window handle of the console
 GetWindowLongA   PROTO, hWnd:DWORD, nIndex:SDWORD                 ; EAX = window value (style)
 SetWindowLongA   PROTO, hWnd:DWORD, nIndex:SDWORD, dwNewLong:DWORD ; change a window value
 GWL_STYLE      = -16                        ; index of the window style
+GetModuleFileNameA PROTO, hModule:DWORD, lpFilename:PTR BYTE, nSize:DWORD ; EAX = length of the exe path
+GetClassNameA    PROTO, hWnd:DWORD, lpClassName:PTR BYTE, nMaxCount:DWORD ; window class name
 WS_MAXIMIZEBOX = 00010000h                  ; style bit: maximize button
 WS_SIZEBOX     = 00040000h                  ; style bit: resizable border
 
@@ -104,6 +106,12 @@ AskPlayAgain PROTO                          ; EAX = 1 for Y, 0 for N or Q
 ClearBuffer PROTO                           ; empties the text overlay (frameBuffer, attrBuffer)
 HideCursor  PROTO                           ; hides the blinking console cursor
 SetupWindow PROTO                           ; console buffer and window = exactly the game size
+OpenLog     PROTO                           ; debug: create wolf_debug.log next to the exe
+CloseLog    PROTO                           ; debug: close the log file
+LogText     PROTO, textPtr:PTR BYTE         ; debug: write a 0-terminated text
+LogNum      PROTO, textPtr:PTR BYTE, value:DWORD ; debug: text + number + new line
+LogCall     PROTO, textPtr:PTR BYTE, retVal:DWORD, errVal:DWORD ; debug: call name, return value, GetLastError
+LogInfo     PROTO, infoPtr:PTR CSBI_EX      ; debug: buffer size, window rect, colours 0..2
 LoadPalette PROTO                           ; saves the console palette, installs the blue/orange theme
 RestorePalette PROTO                        ; puts the saved palette back
 SetPalette  PROTO, infoPtr:PTR CSBI_EX      ; EAX = 1 if the palette in *infoPtr was applied
@@ -282,6 +290,7 @@ PAL_KEEP_TEXT  = 7                          ; slot 7 (light gray text) keeps its
 PAL_KEEP_WHITE = 15                         ; slot 15 (white) keeps its colour
 PAL_SLOTS      = 16                         ; the console has 16 colour slots
 FORCE_FALLBACK = 0                          ; debug: 1 = pretend the palette call failed
+DEBUG_LOG      = 1                          ; debug: 1 = write wolf_debug.log next to the exe
 
 
 .data
@@ -297,6 +306,38 @@ tinyRect    SMALL_RECT <0, 0, 0, 0>          ; 1x1 window, so the buffer can shr
 gameRect    SMALL_RECT <0, 0, SCREEN_W - 1, BUF_H - 1> ; the window we want (inclusive corners)
 gameSize    COORD <SCREEN_W, BUF_H>         ; the buffer size we want
 windowOK    DWORD 0                         ; 1 if the window was set to the game size
+checkInfo   CSBI_EX <>                      ; console settings read back after a change
+
+; ---------- debug log (DEBUG_LOG = 1) ----------
+logHandle   DWORD 0                         ; file handle of wolf_debug.log (0 = no log)
+logPath     BYTE 260 DUP(0)                 ; full path of the log file
+logName     BYTE "wolf_debug.log", 0        ; log file name (put next to the exe)
+logNumText  BYTE "0000000000", 0            ; 10 digits for LogNum
+logRetText  BYTE " ret=", 0                 ; between call name and return value
+logErrText  BYTE " err=", 0                 ; before GetLastError
+logCrLf     BYTE 13, 10, 0                  ; new line
+logClass    BYTE 64 DUP(0)                  ; console window class name
+lgStart     BYTE "WOLF-86 startup log", 13, 10, 0
+lgClass     BYTE "console window class: ", 0
+lgGet       BYTE "GetConsoleScreenBufferInfoEx (start)", 0
+lgSizeX     BYTE "  dwSize.X = ", 0
+lgSizeY     BYTE "  dwSize.Y = ", 0
+lgWinL      BYTE "  srWindow.Left = ", 0
+lgWinT      BYTE "  srWindow.Top = ", 0
+lgWinR      BYTE "  srWindow.Right = ", 0
+lgWinB      BYTE "  srWindow.Bottom = ", 0
+lgCol0      BYTE "  ColorTable[0] = ", 0
+lgCol1      BYTE "  ColorTable[1] = ", 0
+lgCol2      BYTE "  ColorTable[2] = ", 0
+lgSetEx     BYTE "SetConsoleScreenBufferInfoEx", 0
+lgReadBack  BYTE "GetConsoleScreenBufferInfoEx (read back)", 0
+lgMatch     BYTE "palette read back matches theme (1 = yes): ", 0
+lgWinTiny   BYTE "SetConsoleWindowInfo (tiny)", 0
+lgBufSize   BYTE "SetConsoleScreenBufferSize", 0
+lgWinGame   BYTE "SetConsoleWindowInfo (game size)", 0
+lgAfter     BYTE "GetConsoleScreenBufferInfoEx (after resize)", 0
+lgPalOK     BYTE "paletteOK (1 = custom table, 0 = fallback table): ", 0
+lgWinOK     BYTE "windowOK: ", 0
 
 ; ---------- role -> console colour tables (index = role C_SKY .. C_WHITE) ----------
 ; The game always draws with roles. roleColors (the active table) turns a
@@ -482,8 +523,14 @@ againMsg   BYTE "Play again? (Y/N)", 0                    ; question on both scr
 main PROC
     INVOKE SetConsoleOutputCP, CODE_PAGE_437 ; show bytes 176..219 as block characters
     INVOKE HideCursor                       ; get console handle and hide the cursor
+IF DEBUG_LOG
+    INVOKE OpenLog                          ; debug: start wolf_debug.log
+ENDIF
     INVOKE LoadPalette                      ; blue/orange theme (keeps standard colours if it fails)
     INVOKE SetupWindow                      ; window = SCREEN_W x BUF_H (after the palette call)
+IF DEBUG_LOG
+    INVOKE CloseLog                         ; debug: finish wolf_debug.log
+ENDIF
     INVOKE InitInput                        ; get console input handle (for flushing keys)
     INVOKE TitleScreen                      ; show the title screen, EAX = key pressed
     and    al, 11011111b                    ; make the key uppercase
@@ -687,12 +734,31 @@ HideCursor ENDP
 ; Returns:   windowOK = 1 on success
 ; Registers: none (EAX, EBX saved by USES)
 ;-------------------------------------------------------------
-SetupWindow PROC USES eax ebx
+SetupWindow PROC USES eax ebx ecx
     INVOKE SetConsoleWindowInfo, consoleHandle, 1, ADDR tinyRect ; step 1: tiny window
+IF DEBUG_LOG
+    mov  ecx, eax                           ; ECX = result
+    INVOKE GetLastError                     ; EAX = error code
+    INVOKE LogCall, ADDR lgWinTiny, ecx, eax ; log it
+ENDIF
     INVOKE SetConsoleScreenBufferSize, consoleHandle, gameSize   ; step 2: buffer = game size
+IF DEBUG_LOG
+    push eax                                ; keep the result
+    mov  ecx, eax                           ; ECX = result
+    INVOKE GetLastError                     ; EAX = error code
+    INVOKE LogCall, ADDR lgBufSize, ecx, eax ; log it
+    pop  eax                                ; result again
+ENDIF
     cmp  eax, 0                             ; did it fail?
     je   WindowDone                         ; yes: keep the console as it is
     INVOKE SetConsoleWindowInfo, consoleHandle, 1, ADDR gameRect ; step 3: window = buffer
+IF DEBUG_LOG
+    push eax                                ; keep the result
+    mov  ecx, eax                           ; ECX = result
+    INVOKE GetLastError                     ; EAX = error code
+    INVOKE LogCall, ADDR lgWinGame, ecx, eax ; log it
+    pop  eax                                ; result again
+ENDIF
     cmp  eax, 0                             ; did it fail?
     je   WindowDone                         ; yes: keep running
     mov  windowOK, 1                        ; the window now fits the game exactly
@@ -704,8 +770,152 @@ SetupWindow PROC USES eax ebx
     and  eax, NOT (WS_MAXIMIZEBOX OR WS_SIZEBOX) ; clear the maximize and resize bits
     INVOKE SetWindowLongA, ebx, GWL_STYLE, eax   ; apply the new style
 WindowDone:
+IF DEBUG_LOG
+    mov  checkInfo.cbSize, SIZEOF CSBI_EX   ; read the settings again
+    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR checkInfo ; after the resize
+    mov  ecx, eax                           ; ECX = result
+    INVOKE GetLastError                     ; EAX = error code
+    INVOKE LogCall, ADDR lgAfter, ecx, eax  ; log it
+    INVOKE LogInfo, ADDR checkInfo          ; size, window, colours now
+    INVOKE LogNum, ADDR lgWinOK, windowOK   ; did the resize work?
+ENDIF
     ret                                     ; back to caller
 SetupWindow ENDP
+
+IF DEBUG_LOG
+;-------------------------------------------------------------
+; OpenLog  (debug only, DEBUG_LOG = 1)
+; Purpose:   Create wolf_debug.log in the folder of the exe and
+;            write the console window class name (conhost uses
+;            "ConsoleWindowClass", Windows Terminal a pseudo
+;            console window).
+; Receives:  nothing
+; Returns:   logHandle set (0 if the file could not be made)
+; Registers: none (EAX, ECX, EDX, EDI saved by USES)
+;-------------------------------------------------------------
+OpenLog PROC USES eax ecx edx edi
+    INVOKE GetModuleFileNameA, 0, ADDR logPath, 200 ; full path of the exe
+    mov  edi, OFFSET logPath                ; EDI = start of the path
+    add  edi, eax                           ; EDI = end of the path
+FindSlash:
+    cmp  edi, OFFSET logPath                ; back at the start?
+    je   PathReady                          ; yes: no folder part
+    dec  edi                                ; one character back
+    cmp  BYTE PTR [edi], '\'                ; folder separator?
+    jne  FindSlash                          ; no: keep looking
+    inc  edi                                ; the file name starts after it
+PathReady:
+    INVOKE Str_copy, ADDR logName, edi      ; replace the exe name with the log name
+    mov  edx, OFFSET logPath                ; EDX = file name for Irvine
+    call CreateOutputFile                   ; EAX = file handle
+    cmp  eax, INVALID_HANDLE_VALUE          ; failed?
+    je   OpenDone                           ; yes: no log
+    mov  logHandle, eax                     ; keep the handle
+    INVOKE LogText, ADDR lgStart            ; heading
+    INVOKE GetConsoleWindow                 ; EAX = console window
+    INVOKE GetClassNameA, eax, ADDR logClass, 63 ; its class name
+    INVOKE LogText, ADDR lgClass            ; label
+    INVOKE LogText, ADDR logClass           ; class name
+    INVOKE LogText, ADDR logCrLf            ; new line
+OpenDone:
+    ret                                     ; back to caller
+OpenLog ENDP
+
+;-------------------------------------------------------------
+; CloseLog  (debug only)
+; Purpose:   Close wolf_debug.log.
+; Receives:  nothing
+; Returns:   logHandle = 0
+; Registers: none (EAX saved by USES)
+;-------------------------------------------------------------
+CloseLog PROC USES eax
+    mov  eax, logHandle                     ; EAX = file handle
+    cmp  eax, 0                             ; no log?
+    je   CloseDone                          ; nothing to close
+    call CloseFile                          ; close it
+    mov  logHandle, 0                       ; no log any more
+CloseDone:
+    ret                                     ; back to caller
+CloseLog ENDP
+
+;-------------------------------------------------------------
+; LogText  (debug only)
+; Purpose:   Write a 0-terminated text to the log.
+; Receives:  textPtr = address of the text
+; Returns:   nothing
+; Registers: none (EAX, ECX, EDX saved by USES)
+;-------------------------------------------------------------
+LogText PROC USES eax ecx edx, textPtr:PTR BYTE
+    cmp  logHandle, 0                       ; no log open?
+    je   TextDone                           ; then do nothing
+    INVOKE Str_length, textPtr              ; EAX = number of characters
+    mov  ecx, eax                           ; ECX = count for WriteToFile
+    mov  edx, textPtr                       ; EDX = text
+    mov  eax, logHandle                     ; EAX = file handle
+    call WriteToFile                        ; write it
+TextDone:
+    ret                                     ; back to caller
+LogText ENDP
+
+;-------------------------------------------------------------
+; LogNum  (debug only)
+; Purpose:   Write a label, a 10-digit number and a new line.
+; Receives:  textPtr = label, value = number
+; Returns:   nothing
+; Registers: none
+;-------------------------------------------------------------
+LogNum PROC, textPtr:PTR BYTE, value:DWORD
+    INVOKE LogText, textPtr                 ; label
+    INVOKE PutNumber, ADDR logNumText, value, 10 ; number as 10 digits
+    INVOKE LogText, ADDR logNumText         ; number
+    INVOKE LogText, ADDR logCrLf            ; new line
+    ret                                     ; back to caller
+LogNum ENDP
+
+;-------------------------------------------------------------
+; LogCall  (debug only)
+; Purpose:   Write "name ret=<value> err=<GetLastError>".
+; Receives:  textPtr = call name, retVal, errVal
+; Returns:   nothing
+; Registers: none
+;-------------------------------------------------------------
+LogCall PROC, textPtr:PTR BYTE, retVal:DWORD, errVal:DWORD
+    INVOKE LogText, textPtr                 ; call name
+    INVOKE LogText, ADDR logRetText         ; " ret="
+    INVOKE PutNumber, ADDR logNumText, retVal, 10 ; return value
+    INVOKE LogText, ADDR logNumText         ; write it
+    INVOKE LogNum, ADDR logErrText, errVal  ; " err=" + error + new line
+    ret                                     ; back to caller
+LogCall ENDP
+
+;-------------------------------------------------------------
+; LogInfo  (debug only)
+; Purpose:   Write buffer size, window rectangle and the first
+;            three palette colours of a CSBI_EX structure.
+; Receives:  infoPtr = address of the structure
+; Returns:   nothing
+; Registers: none (EAX, EBX saved by USES)
+;-------------------------------------------------------------
+LogInfo PROC USES eax ebx, infoPtr:PTR CSBI_EX
+    mov  ebx, infoPtr                       ; EBX = structure
+    movzx eax, (CSBI_EX PTR [ebx]).dwSize.X ; buffer width
+    INVOKE LogNum, ADDR lgSizeX, eax        ; log it
+    movzx eax, (CSBI_EX PTR [ebx]).dwSize.Y ; buffer height
+    INVOKE LogNum, ADDR lgSizeY, eax        ; log it
+    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Left ; window left
+    INVOKE LogNum, ADDR lgWinL, eax         ; log it
+    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Top ; window top
+    INVOKE LogNum, ADDR lgWinT, eax         ; log it
+    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Right ; window right
+    INVOKE LogNum, ADDR lgWinR, eax         ; log it
+    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Bottom ; window bottom
+    INVOKE LogNum, ADDR lgWinB, eax         ; log it
+    INVOKE LogNum, ADDR lgCol0, (CSBI_EX PTR [ebx]).ColorTable[0] ; colour slot 0
+    INVOKE LogNum, ADDR lgCol1, (CSBI_EX PTR [ebx]).ColorTable[4] ; colour slot 1
+    INVOKE LogNum, ADDR lgCol2, (CSBI_EX PTR [ebx]).ColorTable[8] ; colour slot 2
+    ret                                     ; back to caller
+LogInfo ENDP
+ENDIF
 
 ;-------------------------------------------------------------
 ; LoadPalette
@@ -729,6 +939,14 @@ IF FORCE_FALLBACK                           ; debug build: skip the palette comp
 ENDIF
     mov  origInfo.cbSize, SIZEOF CSBI_EX    ; Windows checks the structure size
     INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR origInfo ; read the settings
+IF DEBUG_LOG
+    push eax                                ; keep the result
+    mov  ecx, eax                           ; ECX = result
+    INVOKE GetLastError                     ; EAX = error code
+    INVOKE LogCall, ADDR lgGet, ecx, eax    ; log result and error
+    INVOKE LogInfo, ADDR origInfo           ; log size, window and colours
+    pop  eax                                ; result again
+ENDIF
     cmp  eax, 0                             ; did it fail?
     je   PaletteDone                        ; yes: keep the standard colours
     cld                                     ; copy forwards
@@ -750,6 +968,21 @@ NextSlot:
     jb   SlotLoop                           ; no: continue
     INVOKE SetPalette, ADDR themeInfo       ; apply the theme, EAX = 1 if it worked
     mov  paletteOK, eax                     ; remember (restore only if we changed it)
+IF DEBUG_LOG
+    mov  checkInfo.cbSize, SIZEOF CSBI_EX   ; read the settings back
+    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR checkInfo ; what did Windows keep?
+    mov  ecx, eax                           ; ECX = result
+    INVOKE GetLastError                     ; EAX = error code
+    INVOKE LogCall, ADDR lgReadBack, ecx, eax ; log result and error
+    INVOKE LogInfo, ADDR checkInfo          ; log what is really set now
+    mov  ecx, 0                             ; assume no match
+    mov  eax, checkInfo.ColorTable[4]       ; slot 1 read back
+    cmp  eax, themeColors[4]                ; same as the theme?
+    jne  LogMatch                           ; no
+    mov  ecx, 1                             ; yes
+LogMatch:
+    INVOKE LogNum, ADDR lgMatch, ecx        ; log the comparison
+ENDIF
 PaletteDone:
     mov  esi, OFFSET customRoles            ; assume the theme palette is active
     cmp  paletteOK, 0                       ; did it work?
@@ -760,6 +993,9 @@ HaveRoles:
     mov  edi, OFFSET roleColors             ; EDI = the active table
     mov  ecx, PAL_SLOTS                     ; 16 roles
     rep  movsb                              ; copy the chosen table
+IF DEBUG_LOG
+    INVOKE LogNum, ADDR lgPalOK, paletteOK  ; which colour table is used
+ENDIF
     ret                                     ; back to caller
 LoadPalette ENDP
 
@@ -814,6 +1050,15 @@ SetPalette PROC USES ebx, infoPtr:PTR CSBI_EX
     inc  (CSBI_EX PTR [ebx]).srWindow.Right ; window width fix
     inc  (CSBI_EX PTR [ebx]).srWindow.Bottom ; window height fix
     INVOKE SetConsoleScreenBufferInfoEx, consoleHandle, ebx ; apply palette and settings
+IF DEBUG_LOG
+    push eax                                ; keep the result
+    push ecx                                ; keep ECX
+    mov  ecx, eax                           ; ECX = result
+    INVOKE GetLastError                     ; EAX = error code
+    INVOKE LogCall, ADDR lgSetEx, ecx, eax  ; log result and error
+    pop  ecx                                ; ECX again
+    pop  eax                                ; result again
+ENDIF
     dec  (CSBI_EX PTR [ebx]).srWindow.Right ; undo the fix in memory
     dec  (CSBI_EX PTR [ebx]).srWindow.Bottom ; (DEC does not change EAX)
     cmp  eax, 0                             ; did Windows accept it?
