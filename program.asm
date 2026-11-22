@@ -162,7 +162,7 @@ RESULT_WIN  = 1                             ; GameLoop result: player touched th
 RESULT_LOSE = 2                             ; GameLoop result: time ran out
 MS_PER_DAY  = 86400000                      ; GetMseconds restarts from 0 at midnight
 BLINK_MS    = 500                           ; blinking things change colour every 500 ms
-TIME_LIMIT  = 120                           ; seconds allowed to reach the exit
+TIME_LIMIT  = 180                           ; seconds allowed to find the keys and escape
 
 ; ---------- HUD layout: where the numbers go inside the HUD row ----------
 HUD_MIN_POS  = 5                            ; "TIME mm:ss": minutes start at column 5
@@ -303,8 +303,8 @@ ctrlBox BYTE 201, 44 DUP(205), 187, 0
         BYTE 186, "  M       show / hide minimap               ", 186, 0
         BYTE 186, "  Q       quit                              ", 186, 0
         BYTE 186, "                                            ", 186, 0
-        BYTE 186, "  GOAL: reach the exit (E) before the       ", 186, 0
-        BYTE 186, "        timer runs out!                     ", 186, 0
+        BYTE 186, "  GOAL: find the 3 keys (K), then reach the ", 186, 0
+        BYTE 186, "        exit (E) before the timer runs out! ", 186, 0
         BYTE 200, 44 DUP(205), 188, 0
 boxColors  BYTE lightCyan, 8 DUP(white), lightCyan         ; border lines cyan, text white
 pressKey   BYTE "PRESS ANY KEY", 0                         ; blinking prompt
@@ -316,9 +316,11 @@ keyMsg     BYTE "KEY FOUND! 0/3", 0                    ; the 0 is replaced by th
 lockedMsg  BYTE "DOOR LOCKED - FIND 3 KEYS", 0         ; shown when touching the door too early
 
 ; ---------- end screen text ----------
-loseText   BYTE "You did not reach the exit in time.", 0  ; lose message
+loseText   BYTE "You did not escape in time.", 0          ; lose message
 timeMsg    BYTE "Time taken: ", 0                         ; label before mm:ss
 stepsMsg   BYTE "Steps:      ", 0                         ; label before the step count
+keysMsg    BYTE "Keys:       ", 0                         ; label before the key count
+keysOf     BYTE "/3", 0                                   ; after the key count
 againMsg   BYTE "Play again? (Y/N)", 0                    ; question on both screens
 
 .code
@@ -1768,8 +1770,8 @@ PrintTime ENDP
 ;-------------------------------------------------------------
 ; WinScreen
 ; Purpose:   Clear the screen and show a green block-letter
-;            "ESCAPED!" banner, the time taken (mm:ss) and the
-;            number of steps. Leaves the cursor where
+;            "ESCAPED!" banner, the time taken (mm:ss), the
+;            number of steps and the keys collected. Leaves the cursor where
 ;            AskPlayAgain should print its question.
 ; Receives:  nothing (uses timer and steps)
 ; Returns:   nothing
@@ -1794,6 +1796,15 @@ WinScreen PROC USES eax edx
     call WriteString                        ; print it
     mov  eax, steps                         ; EAX = step count
     call WriteDec                           ; print it
+    mov  dh, INFO_ROW + 2                   ; third info line
+    mov  dl, INFO_COL                       ; info column
+    call Gotoxy                             ; move the cursor there
+    mov  edx, OFFSET keysMsg                ; "Keys: "
+    call WriteString                        ; print it
+    mov  eax, keys                          ; EAX = keys collected
+    call WriteDec                           ; print it
+    mov  edx, OFFSET keysOf                 ; "/3"
+    call WriteString                        ; print it
     mov  dh, ASK_ROW                        ; row for "Play again?"
     mov  dl, INFO_COL                       ; info column
     call Gotoxy                             ; leave the cursor there
