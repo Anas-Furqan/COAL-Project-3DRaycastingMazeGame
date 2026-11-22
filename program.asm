@@ -119,6 +119,7 @@ DrawColumn  PROTO, column:DWORD             ; draws one screen column from the c
 GetColumnColor PROTO, column:DWORD          ; EAX = colour of a column's wall slice
 CastAllRays PROTO                           ; casts the 80 rays into the column arrays
 IsEdgeColumn PROTO, column:DWORD            ; EAX = 1 if the column is an edge between walls
+IsMortar    PROTO, texRow:DWORD, wallH:DWORD, wallX:DWORD ; EAX = 1 on a brick mortar line
 IsStar      PROTO, rayAngle:DWORD           ; ECX = row in, EAX = 1 if a star is at this ceiling cell
 RenderView  PROTO                           ; casts 80 rays and draws the 3D view
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
@@ -145,6 +146,12 @@ STAR_ATTR      = C_FLOOR_NEAR               ; stars: slot 8 (C_FLOOR_NEAR), dim
 STAR_MOD       = 37                         ; star if (rayAngle*7 + row*13) mod 37 = 0
 EDGE_LOW       = 20                         ; wallX below this = near a cell corner
 EDGE_HIGH      = 236                        ; wallX above this = near a cell corner
+EDGE_WALLX_H   = 12                         ; corner test only for walls shorter than this
+BRICK_MIN_H    = 6                          ; walls shorter than this get no bricks
+BRICK_ROW_H    = 4                          ; texY 0 and 4 are mortar rows (2 brick rows per wall)
+BRICK_W        = 64                         ; brick width in wallX units (4 bricks per cell)
+BRICK_SHIFT    = 32                         ; odd brick rows are shifted by half a brick
+JOINT_W        = 8                          ; vertical joint width in wallX units
 
 ; ---------- title / end screen layout (row, column on the console) ----------
 ART_LINES   = 5                             ; block letters are 5 rows tall
@@ -1711,7 +1718,8 @@ GetWallHeight ENDP
 ;            Edge columns (IsEdgeColumn) draw the whole slice in
 ;            the edge colour, so walls are clearly separated.
 ;            Plain wall slices get a dark outline on their first
-;            and last row (crisp silhouette).
+;            and last row (crisp silhouette) and a brick texture
+;            (IsMortar) when they are at least 6 rows tall.
 ; Receives:  column = screen x (0..79)
 ; Returns:   nothing (frameBuffer, attrBuffer changed)
 ; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
@@ -1722,6 +1730,9 @@ DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD
     LOCAL wallColor:DWORD                   ; colour of the wall slice
     LOCAL rayAng:DWORD                      ; ray angle of this column (for the stars)
     LOCAL plainWall:DWORD                   ; 1 = normal wall slice (gets outline), 0 = edge/door/key
+    LOCAL wallH:DWORD                       ; real wall height in rows
+    LOCAL wallX:DWORD                       ; where along the wall this column is (0..255)
+    LOCAL mortarColor:DWORD                 ; one shade darker than the wall
 
     ; ----- block 1: wall height and position -----
     mov  ebx, column                        ; EBX = column number
@@ -1729,6 +1740,9 @@ DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD
     mov  rayAng, eax                        ; keep it for IsStar
     mov  eax, colDist[ebx*4]                ; EAX = distance (DWORD array)
     call GetWallHeight                      ; EAX = real wall height in rows
+    mov  wallH, eax                         ; keep it for the brick texture
+    movzx edx, colWallX[ebx]                ; EDX = wallX of this column
+    mov  wallX, edx                         ; keep it for the brick joints
     mov  edx, SCREEN_H                      ; EDX = 24
     sub  edx, eax                           ; 24 - height (negative for tall walls)
     sar  edx, 1                             ; half above the wall (signed divide by 2)
@@ -1745,7 +1759,11 @@ DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD
     INVOKE IsEdgeColumn, ebx                ; EAX = 1 for an edge column
     cmp  eax, 0                             ; edge?
     jne  KindDone                           ; yes: the edge line stays solid
-    mov  plainWall, 1                       ; plain wall: outline rows
+    mov  plainWall, 1                       ; plain wall: outline rows and bricks
+    movzx eax, hitSideCol[ebx]              ; EAX = side (0 or 1)
+    INVOKE GetWallLevel, colDist[ebx*4], eax ; EAX = shade level 0..3
+    movzx eax, wallColors[eax + 1]          ; one level darker (level 3 -> outline colour)
+    mov  mortarColor, eax                   ; mortar colour for the bricks
 KindDone:
 
     ; ----- block 3: draw the 24 rows -----
@@ -1784,7 +1802,16 @@ PutWall:
     dec  edx                                ; EDX = last wall row
     cmp  ecx, edx                           ; last row of the slice?
     je   PutOutline                         ; yes: outline
-    jmp  StoreWall                          ; inside the slice: wall colour
+    cmp  wallH, BRICK_MIN_H                 ; slice too small for bricks?
+    jb   StoreWall                          ; yes: keep it clean
+    mov  edx, ecx                           ; EDX = row
+    sub  edx, wallTop                       ; EDX = row inside the slice (0 = top)
+    INVOKE IsMortar, edx, wallH, wallX      ; EAX = 1 on a mortar line
+    cmp  eax, 0                             ; mortar here?
+    mov  eax, wallColor                     ; (MOV does not change the flags) AX = wall colour
+    je   StoreWall                          ; no mortar: wall colour
+    mov  eax, mortarColor                   ; mortar: one shade darker
+    jmp  StoreWall                          ; store it
 PutOutline:
     mov  eax, OUTLINE_ATTR                  ; dark outline against sky and floor
 StoreWall:
@@ -1797,6 +1824,45 @@ NextRow:
     jb   ColumnRow                          ; no: next row
     ret                                     ; back to caller
 DrawColumn ENDP
+
+;-------------------------------------------------------------
+; IsMortar
+; Purpose:   Brick texture test for one wall cell on screen.
+;            texY = texRow * 8 / wallH (0..7): rows 0 and 4 are
+;            horizontal mortar. Vertical joints: bricks are 64
+;            wide (4 per cell); odd brick rows are shifted by 32,
+;            joint where (wallX + shift) mod 64 < 8.
+; Receives:  texRow = row inside the slice (0 = top)
+;            wallH  = real wall height in rows
+;            wallX  = position along the wall (0..255)
+; Returns:   EAX = 1 on mortar, 0 on brick
+; Registers: EAX (ECX, EDX saved by USES)
+;-------------------------------------------------------------
+IsMortar PROC USES ecx edx, texRow:DWORD, wallH:DWORD, wallX:DWORD
+    mov  eax, texRow                        ; EAX = row inside the slice
+    shl  eax, 3                             ; * 8 (8 texture rows per wall)
+    mov  edx, 0                             ; clear EDX before DIV
+    div  wallH                              ; EAX = texY (0..7), wallH is at least 1
+    cmp  eax, 0                             ; top mortar line?
+    je   MortarYes                          ; yes
+    cmp  eax, BRICK_ROW_H                   ; middle mortar line (texY = 4)?
+    je   MortarYes                          ; yes
+    mov  ecx, 0                             ; ECX = shift, 0 for the upper brick row
+    cmp  eax, BRICK_ROW_H                   ; lower brick row (texY 5..7)?
+    jb   HaveShift                          ; no: no shift
+    mov  ecx, BRICK_SHIFT                   ; yes: joints move by half a brick
+HaveShift:
+    mov  eax, wallX                         ; EAX = position along the wall
+    add  eax, ecx                           ; + shift
+    and  eax, BRICK_W - 1                   ; mod 64 (64 is a power of two)
+    cmp  eax, JOINT_W                       ; inside the joint?
+    jb   MortarYes                          ; yes: vertical mortar
+    mov  eax, 0                             ; brick
+    ret                                     ; back to caller
+MortarYes:
+    mov  eax, 1                             ; mortar
+    ret                                     ; back to caller
+IsMortar ENDP
 
 ;-------------------------------------------------------------
 ; GetColumnColor
@@ -1927,18 +1993,25 @@ CastAllRays ENDP
 ;            - it hit a different map cell than the column to
 ;              its left, or a different side of the cell, or
 ;            - the ray hit close to a cell corner
-;              (wallX < 20 or wallX > 236).
+;              (wallX < 20 or wallX > 236), only for walls under
+;              12 rows: up close one column covers so little of
+;              the wall that this test would draw a thick band.
 ; Receives:  column = screen x (0..79), uses the column arrays
 ; Returns:   EAX = 1 for an edge, 0 if not
 ; Registers: EAX (EBX, ESI saved by USES)
 ;-------------------------------------------------------------
 IsEdgeColumn PROC USES ebx esi, column:DWORD
     mov  ebx, column                        ; EBX = column
+    mov  eax, colDist[ebx*4]                ; EAX = distance of this column
+    call GetWallHeight                      ; EAX = wall height in rows
+    cmp  eax, EDGE_WALLX_H                  ; near wall (12 rows or more)?
+    jae  CheckNeighbour                     ; yes: one column covers too little wallX, skip the corner test
     movzx eax, colWallX[ebx]                ; EAX = wallX of this column
     cmp  eax, EDGE_LOW                      ; close to the cell's start?
     jb   EdgeYes                            ; yes: corner line
     cmp  eax, EDGE_HIGH                     ; close to the cell's end?
     ja   EdgeYes                            ; yes: corner line
+CheckNeighbour:
     cmp  ebx, 0                             ; first column has no left neighbour
     je   EdgeNo                             ; so it is not an edge
     mov  esi, OFFSET hitCellCol             ; ESI = base of the cell array
