@@ -112,10 +112,13 @@ AnyKeyDown  PROTO                           ; EAX = 1 if any keyboard key is hel
 WaitKeysReleased PROTO                      ; waits until keys are let go, sets mWasDown/qWasDown
 SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
 CastRay     PROTO, rayAngle:DWORD           ; EAX = distance (Q8), EDX = hitSide, ECX = hit type
-GetWallColor PROTO, distance:DWORD, side:DWORD    ; EAX = wall colour for a distance
+GetWallLevel PROTO, distance:DWORD, side:DWORD    ; EAX = wall shade level 0..3 for a distance
 GetFloorColor PROTO                         ; ECX = row in, EAX = floor colour for that row
-GetWallHeight PROTO                         ; EAX = distance in, EAX = wall height in rows
-DrawColumn  PROTO, column:DWORD, wallHeight:DWORD, wallColor:DWORD, rayAngle:DWORD ; draws one screen column
+GetWallHeight PROTO                         ; EAX = distance in, EAX = real wall height in rows
+DrawColumn  PROTO, column:DWORD             ; draws one screen column from the column arrays
+GetColumnColor PROTO, column:DWORD          ; EAX = colour of a column's wall slice
+CastAllRays PROTO                           ; casts the 80 rays into the column arrays
+IsEdgeColumn PROTO, column:DWORD            ; EAX = 1 if the column is an edge between walls
 IsStar      PROTO, rayAngle:DWORD           ; ECX = row in, EAX = 1 if a star is at this ceiling cell
 RenderView  PROTO                           ; casts 80 rays and draws the 3D view
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
@@ -140,6 +143,8 @@ WALL_CHAR      = 219                        ; code page 437 full block: every wa
 STAR_CHAR      = '.'                        ; a star in the night sky
 STAR_ATTR      = C_FLOOR_NEAR               ; stars: slot 8 (C_FLOOR_NEAR), dim
 STAR_MOD       = 37                         ; star if (rayAngle*7 + row*13) mod 37 = 0
+EDGE_LOW       = 20                         ; wallX below this = near a cell corner
+EDGE_HIGH      = 236                        ; wallX above this = near a cell corner
 
 ; ---------- title / end screen layout (row, column on the console) ----------
 ART_LINES   = 5                             ; block letters are 5 rows tall
@@ -176,6 +181,7 @@ PLAYER_ATTR   = C_GOLD                      ; player arrow: slot 12 (C_GOLD)
 DOOR_COLOR_A   = C_DOOR_A                   ; exit door colour 1: slot 10 (red-orange)
 DOOR_COLOR_B   = C_DOOR_B                   ; exit door colour 2: slot 11 (yellow-orange)
 KEY_COLOR_A    = C_GOLD                     ; key pillar colour 1: slot 12 (gold)
+EDGE_ATTR      = C_SKY                      ; edge lines between walls: background colour
 KEY_COLOR_B    = C_WHITE                    ; key pillar colour 2: slot 15 (white)
 HIT_WALL       = 0                          ; CastRay hit type: normal wall
 HIT_EXIT       = 1                          ; CastRay hit type: exit door
@@ -301,6 +307,16 @@ mWasDown    BYTE 0                          ; 1 if M was held last frame (for si
 qWasDown    BYTE 0                          ; 1 if Q was held last frame (for single press)
 inputHandle DWORD ?                         ; console input handle (set by InitInput)
 blinkOn     DWORD 0                         ; 0 / 1, flips every 500 ms (door, keys, title text)
+
+; ---------- per-column ray results (filled by CastAllRays, used by DrawColumn) ----------
+colAngle    WORD  SCREEN_W DUP(0)           ; ray angle of each column
+colDist     DWORD SCREEN_W DUP(0)           ; fisheye-corrected distance (Q8)
+hitSideCol  BYTE  SCREEN_W DUP(0)           ; 0 = X-side hit, 1 = Y-side hit
+colType     BYTE  SCREEN_W DUP(0)           ; HIT_WALL / HIT_EXIT / HIT_KEY
+hitCellCol  BYTE  SCREEN_W DUP(0)           ; map cell number that was hit
+colWallX    BYTE  SCREEN_W DUP(0)           ; where along the wall (0..255)
+rayCell     DWORD 0                         ; CastRay output: cell number of the hit
+rayWallX    DWORD 0                         ; CastRay output: wallX of the hit
 
 ; ---------- sine table: sinTable[d] = round(sin(d degrees) * 256) ----------
 sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
@@ -1467,6 +1483,8 @@ SetupAxis ENDP
 ;            EDX = hitSide (0 = hit an X gridline,
 ;                           1 = hit a Y gridline)
 ;            ECX = HIT_WALL, HIT_EXIT or HIT_KEY (what stopped the ray)
+;            rayCell  = map cell number of the hit (row*16 + col)
+;            rayWallX = where along that wall the ray hit (0..255)
 ; Registers: EAX, ECX, EDX (EBX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
 CastRay PROC USES ebx esi edi, rayAngle:DWORD
@@ -1556,6 +1574,27 @@ HitOnY:
 HaveRayDist:
     mov  ebx, eax                           ; EBX = distance along the ray (Q8)
 
+    ; ----- block 4b: which cell, and where along its wall -----
+    ; wallX = fractional part of the hit point: on an X-side hit
+    ; it runs along Y (posY + dist*dirY), on a Y-side hit along X.
+    mov  eax, mapY                          ; EAX = row of the hit cell
+    shl  eax, 4                             ; row * 16
+    add  eax, mapX                          ; + column = cell number
+    and  eax, 0FFh                          ; keep it 0..255
+    mov  rayCell, eax                       ; report the hit cell
+    mov  eax, ebx                           ; EAX = distance along the ray
+    cmp  hitSide, 0                         ; hit on an X line?
+    jne  WallXFromX                         ; no: Y line
+    FIXMUL eax, esi                         ; EAX = dist * dirY / 256
+    add  eax, posY                          ; hit point Y (Q8)
+    jmp  HaveWallX                          ; done
+WallXFromX:
+    FIXMUL eax, edi                         ; EAX = dist * dirX / 256
+    add  eax, posX                          ; hit point X (Q8)
+HaveWallX:
+    and  eax, 255                           ; fractional part = position along the wall
+    mov  rayWallX, eax                      ; report it
+
     ; ----- block 5: fisheye correction -----
     ; distance straight ahead = ray distance * cos(rayAngle - angle)
     mov  eax, rayAngle                      ; EAX = ray angle
@@ -1575,18 +1614,17 @@ DistOK:
 CastRay ENDP
 
 ;-------------------------------------------------------------
-; GetWallColor
-; Purpose:   Pick the wall colour for a distance. Closer walls
-;            are brighter. Y-side walls use one level darker so
-;            corners and edges show up.
-;            level: 0 = slot 4 (light blue), 1 = slot 3,
-;                   2 = slot 2, 3 = slot 1 (blue-violet)
+; GetWallLevel
+; Purpose:   Pick the wall shade level for a distance. Closer
+;            walls are brighter. Y-side walls use one level
+;            darker so corners and edges show up.
+;            level 0 (near, brightest) .. 3 (far, darkest)
 ; Receives:  distance = wall distance (Q8)
 ;            side     = hitSide from CastRay (0 or 1)
-; Returns:   EAX = colour attribute (in AL)
+; Returns:   EAX = level 0..3 (index into wallColors)
 ; Registers: EAX only
 ;-------------------------------------------------------------
-GetWallColor PROC, distance:DWORD, side:DWORD
+GetWallLevel PROC, distance:DWORD, side:DWORD
     mov  eax, distance                      ; EAX = distance
     cmp  eax, shadeDist1                    ; under 2 cells?
     jb   Level0                             ; yes
@@ -1610,9 +1648,8 @@ AddSide:
     jbe  HaveLevel                          ; no
     mov  eax, 3                             ; yes: stay at the darkest
 HaveLevel:
-    movzx eax, wallColors[eax]              ; EAX = colour for this level
     ret                                     ; back to caller
-GetWallColor ENDP
+GetWallLevel ENDP
 
 ;-------------------------------------------------------------
 ; GetFloorColor
@@ -1643,11 +1680,12 @@ GetFloorColor ENDP
 
 ;-------------------------------------------------------------
 ; GetWallHeight
-; Purpose:   Turn a distance into a wall height on screen.
-;            height = (SCREEN_H * 256) / distance, max SCREEN_H
-;            (1 cell away = 256 -> full 24 rows).
+; Purpose:   Turn a distance into the real wall height in rows:
+;            height = (SCREEN_H * 256) / distance
+;            (1 cell away = 256 -> 24 rows). Not limited to the
+;            screen: DrawColumn only draws the rows that fit.
 ; Receives:  EAX = distance (Q8, at least 1)
-; Returns:   EAX = wall height in rows (0..24)
+; Returns:   EAX = wall height in rows (1..6144)
 ; Registers: EAX (ECX, EDX saved by USES)
 ;-------------------------------------------------------------
 GetWallHeight PROC USES ecx edx
@@ -1655,9 +1693,9 @@ GetWallHeight PROC USES ecx edx
     mov  eax, SCREEN_H * 256                ; EAX = 6144
     mov  edx, 0                             ; clear EDX before DIV
     div  ecx                                ; EAX = 6144 / distance
-    cmp  eax, SCREEN_H                      ; taller than the screen?
-    jbe  HeightOK                           ; no
-    mov  eax, SCREEN_H                      ; yes: limit to 24 rows
+    cmp  eax, 1                             ; at least one row?
+    jae  HeightOK                           ; yes
+    mov  eax, 1                             ; no: use 1 (no zero-height walls)
 HeightOK:
     ret                                     ; back to caller
 GetWallHeight ENDP
@@ -1665,34 +1703,51 @@ GetWallHeight ENDP
 ;-------------------------------------------------------------
 ; DrawColumn
 ; Purpose:   Fill one screen column, top to bottom:
-;            sky (with stars), wall (solid block in wallColor),
-;            floor (solid block, colour by distance).
-;            The wall is centred vertically. Writes both the
-;            character (frameBuffer) and the colour (attrBuffer).
-; Receives:  column     = screen x (0..79)
-;            wallHeight = wall size in rows (0..24)
-;            wallColor  = colour attribute of the wall
-;            rayAngle   = angle of this column's ray (for stars)
+;            sky (with stars), wall slice, floor. Uses the
+;            results CastAllRays stored for this column.
+;            The wall is centred vertically; rows outside the
+;            screen are simply not drawn (wallTop can be < 0).
+;            Edge columns (IsEdgeColumn) draw the whole slice in
+;            the edge colour, so walls are clearly separated.
+; Receives:  column = screen x (0..79)
 ; Returns:   nothing (frameBuffer, attrBuffer changed)
 ; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD, wallHeight:DWORD, wallColor:DWORD, rayAngle:DWORD
-    mov  ebx, SCREEN_H                      ; EBX = 24
-    sub  ebx, wallHeight                    ; rows not used by the wall
-    shr  ebx, 1                             ; half above: EBX = first wall row
-    mov  edx, ebx                           ; EDX = first wall row
-    add  edx, wallHeight                    ; EDX = first floor row
+DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD
+    LOCAL wallTop:SDWORD                    ; first wall row (may be negative)
+    LOCAL wallBottom:SDWORD                 ; first floor row (may be past the screen)
+    LOCAL wallColor:DWORD                   ; colour of the wall slice
+    LOCAL rayAng:DWORD                      ; ray angle of this column (for the stars)
+
+    ; ----- block 1: wall height and position -----
+    mov  ebx, column                        ; EBX = column number
+    movzx eax, colAngle[ebx*2]              ; ray angle (WORD array, scaled index)
+    mov  rayAng, eax                        ; keep it for IsStar
+    mov  eax, colDist[ebx*4]                ; EAX = distance (DWORD array)
+    call GetWallHeight                      ; EAX = real wall height in rows
+    mov  edx, SCREEN_H                      ; EDX = 24
+    sub  edx, eax                           ; 24 - height (negative for tall walls)
+    sar  edx, 1                             ; half above the wall (signed divide by 2)
+    mov  wallTop, edx                       ; first wall row
+    add  edx, eax                           ; + height
+    mov  wallBottom, edx                    ; first floor row
+
+    ; ----- block 2: wall colour -----
+    INVOKE GetColumnColor, ebx              ; EAX = colour for this column's slice
+    mov  wallColor, eax                     ; keep it
+
+    ; ----- block 3: draw the 24 rows -----
     mov  edi, OFFSET frameBuffer            ; EDI = row 0 of the character buffer
-    add  edi, column                        ; move to this column
-    mov  esi, column                        ; ESI = column
+    add  edi, ebx                           ; move to this column
+    mov  esi, ebx                           ; ESI = column
     shl  esi, 1                             ; column * 2 (each colour is a WORD)
     add  esi, OFFSET attrBuffer             ; ESI = this column in row 0 of the colours
     mov  ecx, 0                             ; ECX = row, start at 0
 ColumnRow:
-    cmp  ecx, ebx                           ; above the wall?
-    jb   PutCeiling                         ; yes: ceiling
-    cmp  ecx, edx                           ; still inside the wall?
-    jb   PutWall                            ; yes: wall
+    cmp  ecx, wallTop                       ; above the wall? (signed: wallTop can be < 0)
+    jl   PutCeiling                         ; yes: sky
+    cmp  ecx, wallBottom                    ; still inside the wall? (signed)
+    jl   PutWall                            ; yes: wall
     mov  BYTE PTR [edi], WALL_CHAR          ; otherwise floor: solid block
     call GetFloorColor                      ; EAX = floor colour for row ECX
     mov  [esi], ax                          ; store the colour
@@ -1700,7 +1755,7 @@ ColumnRow:
 PutCeiling:
     mov  BYTE PTR [edi], ' '                ; assume empty dark sky
     mov  WORD PTR [esi], DEFAULT_ATTR       ; normal colour
-    INVOKE IsStar, rayAngle                 ; EAX = 1 if a star belongs here
+    INVOKE IsStar, rayAng                   ; EAX = 1 if a star belongs here
     cmp  eax, 0                             ; no star?
     je   NextRow                            ; then the row is done
     mov  BYTE PTR [edi], STAR_CHAR          ; star character
@@ -1708,7 +1763,7 @@ PutCeiling:
     jmp  NextRow                            ; done with this row
 PutWall:
     mov  BYTE PTR [edi], WALL_CHAR          ; solid block
-    mov  eax, wallColor                     ; AX = wall colour
+    mov  eax, wallColor                     ; AX = slice colour
     mov  [esi], ax                          ; store the colour
 NextRow:
     add  edi, SCREEN_W                      ; down one row of characters (80 bytes)
@@ -1718,6 +1773,48 @@ NextRow:
     jb   ColumnRow                          ; no: next row
     ret                                     ; back to caller
 DrawColumn ENDP
+
+;-------------------------------------------------------------
+; GetColumnColor
+; Purpose:   Colour of one column's wall slice:
+;            edge column -> edge colour (black outline),
+;            exit door   -> blinking red-orange / yellow-orange,
+;            key         -> blinking gold / white,
+;            wall        -> shade for distance and side.
+; Receives:  column = screen x (0..79), uses the column arrays
+; Returns:   EAX = colour role
+; Registers: EAX (EBX saved by USES)
+;-------------------------------------------------------------
+GetColumnColor PROC USES ebx, column:DWORD
+    INVOKE IsEdgeColumn, column             ; EAX = 1 at an edge between walls
+    cmp  eax, 0                             ; edge?
+    je   NotEdge                            ; no
+    mov  eax, EDGE_ATTR                     ; yes: dark outline line
+    ret                                     ; back to caller
+NotEdge:
+    mov  ebx, column                        ; EBX = column
+    cmp  colType[ebx], HIT_EXIT             ; did the ray hit the exit door?
+    je   DoorColor                          ; yes
+    cmp  colType[ebx], HIT_KEY              ; did it hit a key?
+    je   KeyColor                           ; yes
+    movzx eax, hitSideCol[ebx]              ; EAX = side (0 or 1)
+    INVOKE GetWallLevel, colDist[ebx*4], eax ; EAX = shade level 0..3
+    movzx eax, wallColors[eax]              ; EAX = wall colour for that level
+    ret                                     ; back to caller
+DoorColor:
+    mov  eax, DOOR_COLOR_A                  ; door colour 1 (red-orange)
+    cmp  blinkOn, 0                         ; first half of the blink?
+    je   ColorDone                          ; yes: keep colour 1
+    mov  eax, DOOR_COLOR_B                  ; no: door colour 2 (yellow-orange)
+    ret                                     ; back to caller
+KeyColor:
+    mov  eax, KEY_COLOR_A                   ; key colour 1 (gold)
+    cmp  blinkOn, 0                         ; first half of the blink?
+    je   ColorDone                          ; yes: keep colour 1
+    mov  eax, KEY_COLOR_B                   ; no: key colour 2 (white)
+ColorDone:
+    ret                                     ; back to caller
+GetColumnColor ENDP
 
 ;-------------------------------------------------------------
 ; UpdateBlink
@@ -1764,17 +1861,19 @@ StarDone:
 IsStar ENDP
 
 ;-------------------------------------------------------------
-; RenderView
-; Purpose:   Draw the 3D view: one ray per screen column.
+; CastAllRays
+; Purpose:   Pass 1 of the 3D view: cast one ray per screen
+;            column and store the results in the column arrays
+;            (colAngle, colDist, hitSideCol, colType,
+;            hitCellCol, colWallX).
 ;            rayAngle = angle - FOV/2 + x*FOV/SCREEN_W
 ; Receives:  nothing (uses angle, posX, posY)
-; Returns:   nothing (frameBuffer, attrBuffer filled)
+; Returns:   column arrays filled
 ; Registers: none (EAX, EBX, ECX, EDX saved by USES)
 ;-------------------------------------------------------------
-RenderView PROC USES eax ebx ecx edx
-    LOCAL rayAng:DWORD                      ; this column's ray angle (CastRay changes EAX)
+CastAllRays PROC USES eax ebx ecx edx
     mov  ebx, 0                             ; EBX = column x, start at 0
-ViewColumn:
+CastColumn:
     mov  eax, ebx                           ; EAX = x
     imul eax, FOV                           ; EAX = x * 60
     mov  edx, 0                             ; clear EDX before DIV (x*60 is positive)
@@ -1783,34 +1882,74 @@ ViewColumn:
     add  eax, angle                         ; + player angle
     sub  eax, FOV / 2                       ; - 30: start at the left edge of the view
     call WrapAngle                          ; keep it 0..359
-    mov  rayAng, eax                        ; remember the ray angle for the stars
+    mov  colAngle[ebx*2], ax                ; store the ray angle (WORD, scaled index)
     INVOKE CastRay, eax                     ; EAX = distance, EDX = hitSide, ECX = hit type
-    push eax                                ; keep the distance for the height
-    cmp  ecx, HIT_EXIT                      ; did the ray hit the exit door?
-    je   ExitColumn                         ; yes: use the door colour
-    cmp  ecx, HIT_KEY                       ; did the ray hit a key?
-    je   KeyColumn                          ; yes: use the key colour
-    INVOKE GetWallColor, eax, edx           ; no: EAX = wall colour for this distance
-    mov  ecx, eax                           ; ECX = wall colour
-    jmp  HaveWallColor                      ; colour chosen
-ExitColumn:
-    mov  ecx, DOOR_COLOR_A                  ; ECX = door colour 1 (red-orange)
-    cmp  blinkOn, 0                         ; first half of the blink?
-    je   HaveWallColor                      ; yes: keep colour 1
-    mov  ecx, DOOR_COLOR_B                  ; no: door colour 2 (yellow-orange)
-    jmp  HaveWallColor                      ; colour chosen
-KeyColumn:
-    mov  ecx, KEY_COLOR_A                   ; ECX = key colour 1 (gold)
-    cmp  blinkOn, 0                         ; first half of the blink?
-    je   HaveWallColor                      ; yes: keep colour 1
-    mov  ecx, KEY_COLOR_B                   ; no: key colour 2 (white)
-HaveWallColor:
-    pop  eax                                ; EAX = distance again
-    call GetWallHeight                      ; EAX = wall height in rows
-    INVOKE DrawColumn, ebx, eax, ecx, rayAng ; draw this column
+    mov  colDist[ebx*4], eax                ; store the distance (DWORD, scaled index)
+    mov  hitSideCol[ebx], dl                ; store the side
+    mov  colType[ebx], cl                   ; store what was hit
+    mov  eax, rayCell                       ; EAX = map cell number of the hit
+    mov  hitCellCol[ebx], al                ; store it
+    mov  eax, rayWallX                      ; EAX = where along the wall (0..255)
+    mov  colWallX[ebx], al                  ; store it
     inc  ebx                                ; next column
     cmp  ebx, SCREEN_W                      ; all 80 columns done?
-    jb   ViewColumn                         ; no: next column
+    jb   CastColumn                         ; no: next column
+    ret                                     ; back to caller
+CastAllRays ENDP
+
+;-------------------------------------------------------------
+; IsEdgeColumn
+; Purpose:   Decide if a column is an edge between walls:
+;            - it hit a different map cell than the column to
+;              its left, or a different side of the cell, or
+;            - the ray hit close to a cell corner
+;              (wallX < 20 or wallX > 236).
+; Receives:  column = screen x (0..79), uses the column arrays
+; Returns:   EAX = 1 for an edge, 0 if not
+; Registers: EAX (EBX, ESI saved by USES)
+;-------------------------------------------------------------
+IsEdgeColumn PROC USES ebx esi, column:DWORD
+    mov  ebx, column                        ; EBX = column
+    movzx eax, colWallX[ebx]                ; EAX = wallX of this column
+    cmp  eax, EDGE_LOW                      ; close to the cell's start?
+    jb   EdgeYes                            ; yes: corner line
+    cmp  eax, EDGE_HIGH                     ; close to the cell's end?
+    ja   EdgeYes                            ; yes: corner line
+    cmp  ebx, 0                             ; first column has no left neighbour
+    je   EdgeNo                             ; so it is not an edge
+    mov  esi, OFFSET hitCellCol             ; ESI = base of the cell array
+    mov  al, [esi + ebx]                    ; AL = this column's cell (base-index)
+    cmp  al, [esi + ebx - 1]                ; same cell as the column to the left?
+    jne  EdgeYes                            ; no: a new wall starts here
+    mov  esi, OFFSET hitSideCol             ; ESI = base of the side array
+    mov  al, [esi + ebx]                    ; AL = this column's side
+    cmp  al, [esi + ebx - 1]                ; same side as the column to the left?
+    jne  EdgeYes                            ; no: a corner of the block
+EdgeNo:
+    mov  eax, 0                             ; not an edge
+    ret                                     ; back to caller
+EdgeYes:
+    mov  eax, 1                             ; edge
+    ret                                     ; back to caller
+IsEdgeColumn ENDP
+
+;-------------------------------------------------------------
+; RenderView
+; Purpose:   Draw the 3D view in two passes: cast all 80 rays
+;            first (so each column can look at its neighbour
+;            for edges), then draw the 80 columns.
+; Receives:  nothing (uses angle, posX, posY)
+; Returns:   nothing (frameBuffer, attrBuffer filled)
+; Registers: none (EBX saved by USES)
+;-------------------------------------------------------------
+RenderView PROC USES ebx
+    call CastAllRays                        ; pass 1: fill the column arrays
+    mov  ebx, 0                             ; EBX = column x
+DrawNext:
+    INVOKE DrawColumn, ebx                  ; pass 2: draw this column
+    inc  ebx                                ; next column
+    cmp  ebx, SCREEN_W                      ; all 80 columns done?
+    jb   DrawNext                           ; no: next column
     ret                                     ; back to caller
 RenderView ENDP
 

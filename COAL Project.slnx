@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="COAL Project.vcxproj" />
+  <Project Path="COAL Project.vcxproj" Id="2210cb1d-904f-444a-93ed-563c8f95f9a8" />
 </Solution>
