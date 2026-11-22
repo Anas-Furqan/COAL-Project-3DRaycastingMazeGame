@@ -65,7 +65,7 @@ UpdateBlink PROTO                           ; blinkOn = 0 or 1, flips every 500 
 AnyKeyDown  PROTO                           ; EAX = 1 if any keyboard key is held
 WaitKeysReleased PROTO                      ; waits until keys are let go, sets mWasDown/qWasDown
 SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
-CastRay     PROTO, rayAngle:DWORD           ; EAX = distance (Q8), EDX = hitSide, ECX = 1 if exit
+CastRay     PROTO, rayAngle:DWORD           ; EAX = distance (Q8), EDX = hitSide, ECX = hit type
 GetWallColor PROTO, distance:DWORD, side:DWORD    ; EAX = wall colour for a distance
 GetFloorColor PROTO                         ; ECX = row in, EAX = floor colour for that row
 GetWallHeight PROTO                         ; EAX = distance in, EAX = wall height in rows
@@ -129,6 +129,11 @@ MAP_KEY_ATTR  = yellow + (black * 16)       ; keys: yellow
 PLAYER_ATTR   = yellow + (black * 16)       ; player arrow: bright yellow
 DOOR_COLOR_A   = lightRed + (black * 16)    ; exit door colour 1 (bright red)
 DOOR_COLOR_B   = yellow + (black * 16)      ; exit door colour 2 (yellow)
+KEY_COLOR_A    = yellow + (black * 16)      ; key pillar colour 1 (yellow)
+KEY_COLOR_B    = white + (black * 16)       ; key pillar colour 2 (bright white)
+HIT_WALL       = 0                          ; CastRay hit type: normal wall
+HIT_EXIT       = 1                          ; CastRay hit type: exit door
+HIT_KEY        = 2                          ; CastRay hit type: key
 DEFAULT_ATTR   = lightGray + (black * 16)   ; normal colour: light gray text on black
 
 ; ---------- cell types returned by IsWall ----------
@@ -1069,7 +1074,7 @@ SetupAxis ENDP
 ;            corrected, at least 1
 ;            EDX = hitSide (0 = hit an X gridline,
 ;                           1 = hit a Y gridline)
-;            ECX = 1 if the cell hit is the exit 'E', else 0
+;            ECX = HIT_WALL, HIT_EXIT or HIT_KEY (what stopped the ray)
 ; Registers: EAX, ECX, EDX (EBX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
 CastRay PROC USES ebx esi edi, rayAngle:DWORD
@@ -1078,9 +1083,9 @@ CastRay PROC USES ebx esi edi, rayAngle:DWORD
     LOCAL deltaX:SDWORD, deltaY:SDWORD      ; ray length to cross one cell, per axis
     LOCAL sideX:SDWORD, sideY:SDWORD        ; ray length to the next X / Y grid line
     LOCAL hitSide:DWORD                     ; 0 = last step was in X, 1 = in Y
-    LOCAL hitExit:DWORD                     ; 1 if the ray stopped on the exit
+    LOCAL hitType:DWORD                     ; what stopped the ray: HIT_WALL / HIT_EXIT / HIT_KEY
 
-    mov  hitExit, 0                         ; assume a normal wall until we know
+    mov  hitType, HIT_WALL                  ; assume a normal wall until we know
 
     ; ----- block 1: ray direction from the tables -----
     mov  eax, rayAngle                      ; EAX = ray angle
@@ -1135,9 +1140,14 @@ CheckCell:
     add  eax, mapX                          ; row*16 + col
     cmp  gameMap[eax], '#'                  ; is this cell a wall?
     je   RayHit                             ; yes: stop
+    cmp  gameMap[eax], 'K'                  ; is it a key?
+    je   RayKey                             ; yes: keys also stop the ray
     cmp  gameMap[eax], 'E'                  ; is it the exit door?
     jne  DDALoop                            ; no: keep stepping
-    mov  hitExit, 1                         ; yes: the exit also stops the ray
+    mov  hitType, HIT_EXIT                  ; yes: the exit also stops the ray
+    jmp  RayHit                             ; go work out the distance
+RayKey:
+    mov  hitType, HIT_KEY                   ; the ray stopped on a key
 RayHit:
 
     ; ----- block 4: distance along the ray to the wall -----
@@ -1168,8 +1178,8 @@ HaveRayDist:
     mov  eax, 1                             ; no: use 1
 DistOK:
     mov  edx, hitSide                       ; EDX = which kind of gridline we hit
-    mov  ecx, hitExit                       ; ECX = 1 if it was the exit
-    ret                                     ; back to caller (EAX = distance, EDX = side, ECX = exit)
+    mov  ecx, hitType                       ; ECX = what was hit
+    ret                                     ; back to caller (EAX = distance, EDX = side, ECX = hit type)
 CastRay ENDP
 
 ;-------------------------------------------------------------
@@ -1382,10 +1392,12 @@ ViewColumn:
     sub  eax, FOV / 2                       ; - 30: start at the left edge of the view
     call WrapAngle                          ; keep it 0..359
     mov  rayAng, eax                        ; remember the ray angle for the stars
-    INVOKE CastRay, eax                     ; EAX = distance, EDX = hitSide, ECX = exit?
+    INVOKE CastRay, eax                     ; EAX = distance, EDX = hitSide, ECX = hit type
     push eax                                ; keep the distance for the height
-    cmp  ecx, 1                             ; did the ray hit the exit door?
+    cmp  ecx, HIT_EXIT                      ; did the ray hit the exit door?
     je   ExitColumn                         ; yes: use the door colour
+    cmp  ecx, HIT_KEY                       ; did the ray hit a key?
+    je   KeyColumn                          ; yes: use the key colour
     INVOKE GetWallColor, eax, edx           ; no: EAX = wall colour for this distance
     mov  ecx, eax                           ; ECX = wall colour
     jmp  HaveWallColor                      ; colour chosen
@@ -1394,6 +1406,12 @@ ExitColumn:
     cmp  blinkOn, 0                         ; first half of the blink?
     je   HaveWallColor                      ; yes: keep colour 1
     mov  ecx, DOOR_COLOR_B                  ; no: door colour 2 (yellow)
+    jmp  HaveWallColor                      ; colour chosen
+KeyColumn:
+    mov  ecx, KEY_COLOR_A                   ; ECX = key colour 1 (yellow)
+    cmp  blinkOn, 0                         ; first half of the blink?
+    je   HaveWallColor                      ; yes: keep colour 1
+    mov  ecx, KEY_COLOR_B                   ; no: key colour 2 (white)
 HaveWallColor:
     pop  eax                                ; EAX = distance again
     call GetWallHeight                      ; EAX = wall height in rows
