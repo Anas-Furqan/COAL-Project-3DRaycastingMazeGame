@@ -22,6 +22,24 @@ MAP_W    = 16                               ; map width in cells
 MAP_H    = 16                               ; map height in cells
 FOV      = 60                               ; field of view in degrees
 
+; ---------- colour attributes = palette slot (background slot 0 = near-black sky) ----------
+C_SKY        = 0                            ; sky / background
+C_WALL_3     = 1                            ; wall, far
+C_WALL_2     = 2                            ; wall
+C_WALL_1     = 3                            ; wall
+C_WALL_0     = 4                            ; wall, near
+C_FLOOR_FAR  = 5                            ; floor, far
+C_FLOOR_MID  = 6                            ; floor, middle
+C_TEXT       = 7                            ; normal text (light gray, unchanged)
+C_FLOOR_NEAR = 8                            ; floor near, stars
+C_MAP_WALL   = 9                            ; minimap walls and borders
+C_DOOR_A     = 10                           ; door colour 1 (red-orange)
+C_DOOR_B     = 11                           ; door colour 2, accent text (yellow-orange)
+C_GOLD       = 12                           ; keys, player arrow, win banner
+C_DANGER     = 13                           ; timer under 20 s, lose banner
+C_VIOLET     = 14                           ; logo second tone
+C_WHITE      = 15                           ; white (unchanged)
+
 ; ---------- FIXMUL macro: Q8 fixed-point multiply ----------
 ; dest = (dest * src) / 256. Two Q8 numbers multiplied give a
 ; Q16 result, so SAR 8 brings it back to Q8 (SAR keeps the sign).
@@ -118,7 +136,7 @@ CODE_PAGE_437  = 437                        ; old IBM PC character set (has the 
 FLOOR_BAND     = 3                          ; each floor shade covers 3 rows
 WALL_CHAR      = 219                        ; code page 437 full block: every wall cell
 STAR_CHAR      = '.'                        ; a star in the night sky
-STAR_ATTR      = gray + (black * 16)        ; stars are dim dark gray
+STAR_ATTR      = C_FLOOR_NEAR               ; stars: slot 8 (C_FLOOR_NEAR), dim
 STAR_MOD       = 37                         ; star if (rayAngle*7 + row*13) mod 37 = 0
 
 ; ---------- title / end screen layout (row, column on the console) ----------
@@ -148,19 +166,19 @@ BOX_BL        = 192                         ; bottom-left corner
 BOX_BR        = 217                         ; bottom-right corner
 BOX_H         = 196                         ; horizontal line
 BOX_V         = 179                         ; vertical line
-BORDER_ATTR   = lightGray + (black * 16)    ; border colour
-MAP_WALL_ATTR = gray + (black * 16)         ; walls: dark gray
-MAP_EXIT_ATTR = lightRed + (black * 16)     ; exit: red
-MAP_KEY_ATTR  = yellow + (black * 16)       ; keys: yellow
-PLAYER_ATTR   = yellow + (black * 16)       ; player arrow: bright yellow
-DOOR_COLOR_A   = lightRed + (black * 16)    ; exit door colour 1 (bright red)
-DOOR_COLOR_B   = yellow + (black * 16)      ; exit door colour 2 (yellow)
-KEY_COLOR_A    = yellow + (black * 16)      ; key pillar colour 1 (yellow)
-KEY_COLOR_B    = white + (black * 16)       ; key pillar colour 2 (bright white)
+BORDER_ATTR   = C_MAP_WALL                  ; border: slot 9 (C_MAP_WALL)
+MAP_WALL_ATTR = C_MAP_WALL                  ; walls: slot 9 (C_MAP_WALL)
+MAP_EXIT_ATTR = C_DOOR_A                    ; exit: slot 10 (C_DOOR_A, red-orange)
+MAP_KEY_ATTR  = C_GOLD                      ; keys: slot 12 (C_GOLD)
+PLAYER_ATTR   = C_GOLD                      ; player arrow: slot 12 (C_GOLD)
+DOOR_COLOR_A   = C_DOOR_A                   ; exit door colour 1: slot 10 (red-orange)
+DOOR_COLOR_B   = C_DOOR_B                   ; exit door colour 2: slot 11 (yellow-orange)
+KEY_COLOR_A    = C_GOLD                     ; key pillar colour 1: slot 12 (gold)
+KEY_COLOR_B    = C_WHITE                    ; key pillar colour 2: slot 15 (white)
 HIT_WALL       = 0                          ; CastRay hit type: normal wall
 HIT_EXIT       = 1                          ; CastRay hit type: exit door
 HIT_KEY        = 2                          ; CastRay hit type: key
-DEFAULT_ATTR   = lightGray + (black * 16)   ; normal colour: light gray text on black
+DEFAULT_ATTR   = C_TEXT                     ; normal colour: slot 7 text on slot 0 background
 
 ; ---------- cell types returned by IsWall ----------
 CELL_FREE = 0                               ; floor: can walk here
@@ -170,8 +188,8 @@ CELL_KEY  = 3                               ; 'K': blocks movement, touching it 
 KEYS_NEEDED   = 3                           ; keys needed to open the exit door
 MSG_MS        = 2000                        ; HUD messages stay for 2 seconds
 KEY_MSG_DIGIT = 11                          ; position of n in "KEY FOUND! n/3"
-KEY_MSG_ATTR  = yellow + (black * 16)       ; "KEY FOUND" message colour
-LOCKED_ATTR   = lightRed + (black * 16)     ; "DOOR LOCKED" message colour
+KEY_MSG_ATTR  = C_DOOR_B                    ; "KEY FOUND" message: slot 11 (accent)
+LOCKED_ATTR   = C_DOOR_B                    ; "DOOR LOCKED" message: slot 11 (accent)
 
 ; ---------- game start values and results ----------
 START_X     = 384                           ; 1.5 cells: centre of column 1
@@ -192,8 +210,11 @@ HUD_KEY_POS  = 30                           ; "KEYS n/3": the key count is at co
 HUD_MSG_POS  = 35                           ; messages replace the controls text from column 35
 HUD_TIME_LEN = 10                           ; "TIME mm:ss" is 10 characters
 LOW_TIME     = 20                           ; timer turns red below 20 seconds
-TIMER_ATTR     = white + (black * 16)       ; timer colour: bright white
-TIMER_LOW_ATTR = lightRed + (black * 16)    ; timer colour when time is short: bright red
+TIMER_ATTR     = C_WHITE                    ; timer colour: slot 15 (white)
+TIMER_LOW_ATTR = C_DANGER                   ; timer under 20 s: slot 13 (danger)
+KEYS_ATTR      = C_GOLD                     ; "KEYS n/3": slot 12 (gold)
+HUD_KEYS_COL   = 25                         ; "KEYS n/3" starts at column 25
+HUD_KEYS_LEN   = 8                          ; "KEYS n/3" is 8 characters
 
 ; ---------- theme colours: COLORREF = 00BBGGRRh (web #RRGGBB written backwards) ----------
 RGB_SKY        = 001A0E0Ah                  ; slot 0  sky / background   #0A0E1A
@@ -213,6 +234,7 @@ RGB_VIOLET     = 00FF5C7Ah                  ; slot 14 logo 2nd tone      #7A5CFF
 PAL_KEEP_TEXT  = 7                          ; slot 7 (light gray text) keeps its colour
 PAL_KEEP_WHITE = 15                         ; slot 15 (white) keeps its colour
 PAL_SLOTS      = 16                         ; the console has 16 colour slots
+
 
 .data
 ; ---------- console palette ----------
@@ -308,8 +330,8 @@ sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
 shadeDist1  DWORD 512                       ; under 2 cells  -> level 0 (darkest/solid)
 shadeDist2  DWORD 1024                      ; under 4 cells  -> level 1
 shadeDist3  DWORD 2048                      ; under 8 cells  -> level 2, else level 3
-wallColors  BYTE lightCyan, cyan, lightBlue, blue  ; wall colours: nearest (brightest) first
-floorColors BYTE yellow, brown, brown, gray ; floor colours: nearest rows first
+wallColors  BYTE C_WALL_0, C_WALL_1, C_WALL_2, C_WALL_3 ; wall colours: nearest (brightest) first
+floorColors BYTE C_FLOOR_NEAR, C_FLOOR_MID, C_FLOOR_FAR, C_FLOOR_FAR ; floor: nearest rows first
 
 ; ---------- screen drawing data ----------
 frameBuffer   BYTE SCREEN_W * BUF_H DUP(' ')      ; 80x25 = 2000 chars, cell (row,col) at row*80 + col
@@ -338,9 +360,9 @@ loseArt BYTE "##### ##### #   # #####       #   # #### ", 0
         BYTE "  #     #   # # # ####        #   # #### ", 0
         BYTE "  #     #   #   # #           #   # #    ", 0
         BYTE "  #   ##### #   # #####        ###  #    ", 0
-logoColors BYTE yellow, yellow, lightRed, lightRed, red       ; one colour per logo line
-winColors  BYTE 5 DUP(lightGreen)                          ; banner colours: all green
-loseColors BYTE 5 DUP(lightRed)                            ; banner colours: all red
+logoColors BYTE C_WALL_0, C_WALL_1, C_WALL_2, C_VIOLET, C_VIOLET ; logo: blue (top) to violet (bottom)
+winColors  BYTE 5 DUP(C_GOLD)                              ; win banner: gold
+loseColors BYTE 5 DUP(C_DANGER)                            ; lose banner: danger red
 subText    BYTE "A 3D RAYCASTING MAZE GAME IN x86 ASSEMBLY", 0 ; line under the logo
 ; ---------- controls box (code page 437 double-line box) ----------
 ctrlBox BYTE 201, 44 DUP(205), 187, 0
@@ -353,7 +375,7 @@ ctrlBox BYTE 201, 44 DUP(205), 187, 0
         BYTE 186, "  GOAL: find the 3 keys (K), then reach the ", 186, 0
         BYTE 186, "        exit (E) before the timer runs out! ", 186, 0
         BYTE 200, 44 DUP(205), 188, 0
-boxColors  BYTE lightCyan, 8 DUP(white), lightCyan         ; border lines cyan, text white
+boxColors  BYTE C_MAP_WALL, 8 DUP(C_WHITE), C_MAP_WALL     ; box border slot 9, text white
 pressKey   BYTE "PRESS ANY KEY", 0                         ; blinking prompt
 
 ; ---------- HUD text (numbers are filled in each frame) ----------
@@ -392,7 +414,7 @@ main PROC
 NewGame:
     INVOKE WaitKeysReleased                 ; the last key pressed can't trigger M or Q
     INVOKE ResetGame                        ; start position, angle, steps, timer
-    mov    eax, lightGray + (black * 16)    ; normal colours (win/lose screens used green/red)
+    mov    eax, DEFAULT_ATTR                ; normal colours (win/lose screens used gold/red)
     call   SetTextColor                     ; Clrscr paints every cell with this colour
     call   Clrscr                           ; clean screen for the game
     INVOKE GameLoop                         ; play; EAX = how the game ended
@@ -409,7 +431,7 @@ AskAgain:
     cmp    eax, 1                           ; play again?
     je     NewGame                          ; yes: start a new game
 QuitProgram:
-    mov    eax, lightGray + (black * 16)    ; normal colours for the console we leave behind
+    mov    eax, DEFAULT_ATTR                ; normal colours for the console we leave behind
     call   SetTextColor                     ; apply them
     INVOKE RestorePalette                   ; give the console its own colours back
     call   Clrscr                           ; leave a clean console behind
@@ -458,7 +480,7 @@ GetCos ENDP
 TitleScreen PROC USES edx
     call Clrscr                             ; clear the console
     INVOKE PrintArt, ADDR logoArt, ADDR logoColors, ART_LINES, LOGO_ROW, LOGO_COL ; big logo
-    mov  eax, lightCyan + (black * 16)      ; subtitle colour
+    mov  eax, C_DOOR_B                      ; subtitle colour: orange accent
     call SetTextColor                       ; apply it
     mov  dh, SUB_ROW                        ; row of the subtitle
     mov  dl, SUB_COL                        ; column of the subtitle
@@ -468,10 +490,10 @@ TitleScreen PROC USES edx
     INVOKE PrintArt, ADDR ctrlBox, ADDR boxColors, BOX_LINES, BOX_ROW, BOX_COL ; controls box
 TitleWait:
     call UpdateBlink                        ; blinkOn = 0 or 1 from the clock
-    mov  eax, yellow + (black * 16)         ; bright prompt
+    mov  eax, C_DOOR_B                      ; bright prompt: orange accent
     cmp  blinkOn, 0                         ; first half of the blink?
-    je   PromptColor                        ; yes: keep yellow
-    mov  eax, gray + (black * 16)           ; no: dim dark gray
+    je   PromptColor                        ; yes: keep orange
+    mov  eax, C_FLOOR_NEAR                  ; no: dim
 PromptColor:
     call SetTextColor                       ; apply the prompt colour
     mov  dh, PRESS_ROW                      ; row of the prompt
@@ -1218,8 +1240,8 @@ PutCell ENDP
 ;-------------------------------------------------------------
 ; GetMapLook
 ; Purpose:   Choose how one map cell looks on the minimap.
-;            '#' -> dark gray block, 'E' -> red E,
-;            'K' -> yellow K, anything else -> black space.
+;            '#' -> blue-gray block, 'E' -> orange E,
+;            'K' -> gold K, anything else -> dark space.
 ; Receives:  EAX = map character (in AL)
 ; Returns:   EAX = screen character, EBX = colour attribute
 ; Registers: EAX, EBX
@@ -1232,19 +1254,19 @@ GetMapLook PROC
     cmp  al, 'K'                            ; key?
     je   LookKey                            ; yes
     mov  eax, ' '                           ; floor: empty
-    mov  ebx, DEFAULT_ATTR                  ; on black
+    mov  ebx, DEFAULT_ATTR                  ; on the dark background
     ret                                     ; back to caller
 LookWall:
     mov  eax, WALL_CHAR                     ; solid block
-    mov  ebx, MAP_WALL_ATTR                 ; dark gray
+    mov  ebx, MAP_WALL_ATTR                 ; blue-gray
     ret                                     ; back to caller
 LookExit:
     mov  eax, 'E'                           ; letter E
-    mov  ebx, MAP_EXIT_ATTR                 ; red
+    mov  ebx, MAP_EXIT_ATTR                 ; orange
     ret                                     ; back to caller
 LookKey:
     mov  eax, 'K'                           ; letter K
-    mov  ebx, MAP_KEY_ATTR                  ; yellow
+    mov  ebx, MAP_KEY_ATTR                  ; gold
     ret                                     ; back to caller
 GetMapLook ENDP
 
@@ -1277,7 +1299,7 @@ DrawMapBorder ENDP
 ; DrawMinimap
 ; Purpose:   If showMinimap = 1, draw the 16x16 map in colour
 ;            inside a border at the top-left of the frame, and a
-;            yellow direction arrow on the player's cell.
+;            gold direction arrow on the player's cell.
 ;            Map cell (r, c) goes to screen (r+1, c+1).
 ; Receives:  nothing (uses gameMap, posX, posY)
 ; Returns:   nothing (frameBuffer, attrBuffer changed)
@@ -1314,7 +1336,7 @@ MapCol:
     sar  edi, 8                             ; player column
     inc  edi                                ; +1 for the border
     call GetArrowChar                       ; EAX = arrow for the facing direction
-    INVOKE PutCell, esi, edi, eax, PLAYER_ATTR ; bright yellow arrow
+    INVOKE PutCell, esi, edi, eax, PLAYER_ATTR ; gold arrow
 MapDone:
     ret                                     ; back to caller
 DrawMinimap ENDP
@@ -1487,8 +1509,8 @@ CastRay ENDP
 ; Purpose:   Pick the wall colour for a distance. Closer walls
 ;            are brighter. Y-side walls use one level darker so
 ;            corners and edges show up.
-;            level: 0 = light cyan, 1 = cyan, 2 = light blue,
-;                   3 = blue
+;            level: 0 = slot 4 (light blue), 1 = slot 3,
+;                   2 = slot 2, 3 = slot 1 (blue-violet)
 ; Receives:  distance = wall distance (Q8)
 ;            side     = hitSide from CastRay (0 or 1)
 ; Returns:   EAX = colour attribute (in AL)
@@ -1528,7 +1550,7 @@ GetWallColor ENDP
 ;            the bottom are close to the player and are bright;
 ;            higher rows are further away and darker.
 ;            level = (rows from bottom) / 3, max 3
-;            yellow (bottom 3 rows), brown, brown, dark gray
+;            slot 8 (bottom 3 rows), slot 6, slot 5, slot 5
 ; Receives:  ECX = screen row (0..23)
 ; Returns:   EAX = floor colour attribute (in AL)
 ; Registers: EAX (EDX saved by USES)
@@ -1606,13 +1628,13 @@ ColumnRow:
     mov  [esi], ax                          ; store the colour
     jmp  NextRow                            ; done with this row
 PutCeiling:
-    mov  BYTE PTR [edi], ' '                ; assume empty black sky
+    mov  BYTE PTR [edi], ' '                ; assume empty dark sky
     mov  WORD PTR [esi], DEFAULT_ATTR       ; normal colour
     INVOKE IsStar, rayAngle                 ; EAX = 1 if a star belongs here
     cmp  eax, 0                             ; no star?
     je   NextRow                            ; then the row is done
     mov  BYTE PTR [edi], STAR_CHAR          ; star character
-    mov  WORD PTR [esi], STAR_ATTR          ; dim dark gray
+    mov  WORD PTR [esi], STAR_ATTR          ; dim star colour
     jmp  NextRow                            ; done with this row
 PutWall:
     mov  BYTE PTR [edi], WALL_CHAR          ; solid block
@@ -1702,13 +1724,13 @@ ViewColumn:
     mov  ecx, eax                           ; ECX = wall colour
     jmp  HaveWallColor                      ; colour chosen
 ExitColumn:
-    mov  ecx, DOOR_COLOR_A                  ; ECX = door colour 1 (bright red)
+    mov  ecx, DOOR_COLOR_A                  ; ECX = door colour 1 (red-orange)
     cmp  blinkOn, 0                         ; first half of the blink?
     je   HaveWallColor                      ; yes: keep colour 1
-    mov  ecx, DOOR_COLOR_B                  ; no: door colour 2 (yellow)
+    mov  ecx, DOOR_COLOR_B                  ; no: door colour 2 (yellow-orange)
     jmp  HaveWallColor                      ; colour chosen
 KeyColumn:
-    mov  ecx, KEY_COLOR_A                   ; ECX = key colour 1 (yellow)
+    mov  ecx, KEY_COLOR_A                   ; ECX = key colour 1 (gold)
     cmp  blinkOn, 0                         ; first half of the blink?
     je   HaveWallColor                      ; yes: keep colour 1
     mov  ecx, KEY_COLOR_B                   ; no: key colour 2 (white)
@@ -1818,8 +1840,8 @@ PutNumber ENDP
 ; Purpose:   Fill the HUD row (row 24) of frameBuffer:
 ;            "TIME mm:ss  STEPS nnnnn  W/S move ..."
 ;            Copy the template, then write the numbers in.
-;            The timer is bright white (red under 20 s), the
-;            rest keeps the normal light gray.
+;            The timer is white (danger red under 20 s),
+;            "KEYS n/3" is gold, labels keep the normal gray.
 ; Receives:  nothing (uses steps and the timer)
 ; Returns:   nothing (frameBuffer HUD row changed)
 ; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
@@ -1852,12 +1874,16 @@ DrawHUD PROC USES eax ebx ecx edx esi edi
     mov  edx, TIMER_ATTR                    ; assume plenty of time: bright white
     cmp  eax, LOW_TIME                      ; under 20 seconds left?
     jae  HaveTimerColor                     ; no: keep white
-    mov  edx, TIMER_LOW_ATTR                ; yes: bright red warning
+    mov  edx, TIMER_LOW_ATTR                ; yes: danger red warning
 HaveTimerColor:
     mov  eax, edx                           ; AX = timer colour
     mov  edi, OFFSET attrBuffer + HUD_ROW * SCREEN_W * 2 ; EDI = colours of the HUD row
     mov  ecx, HUD_TIME_LEN                  ; ECX = "TIME mm:ss" = 10 cells
-    rep  stosw                              ; colour the timer (rest of the row stays light gray)
+    rep  stosw                              ; colour the timer (labels stay light gray)
+    mov  eax, KEYS_ATTR                     ; AX = gold
+    mov  edi, OFFSET attrBuffer + (HUD_ROW * SCREEN_W + HUD_KEYS_COL) * 2 ; EDI = "KEYS n/3" colours
+    mov  ecx, HUD_KEYS_LEN                  ; ECX = 8 cells
+    rep  stosw                              ; colour "KEYS n/3"
     ret                                     ; back to caller
 DrawHUD ENDP
 
@@ -1902,7 +1928,7 @@ PrintTime ENDP
 
 ;-------------------------------------------------------------
 ; WinScreen
-; Purpose:   Clear the screen and show a green block-letter
+; Purpose:   Clear the screen and show a gold block-letter
 ;            "ESCAPED!" banner, the time taken (mm:ss), the
 ;            number of steps and the keys collected. Leaves the cursor where
 ;            AskPlayAgain should print its question.
@@ -1912,8 +1938,8 @@ PrintTime ENDP
 ;-------------------------------------------------------------
 WinScreen PROC USES eax edx
     call Clrscr                             ; clear the console
-    INVOKE PrintArt, ADDR winArt, ADDR winColors, ART_LINES, BANNER_ROW, WIN_COL ; green banner
-    mov  eax, white + (black * 16)          ; white text
+    INVOKE PrintArt, ADDR winArt, ADDR winColors, ART_LINES, BANNER_ROW, WIN_COL ; gold banner
+    mov  eax, C_WHITE                       ; white text
     call SetTextColor                       ; apply the colour
     mov  dh, INFO_ROW                       ; first info line
     mov  dl, INFO_COL                       ; info column
@@ -1946,7 +1972,7 @@ WinScreen ENDP
 
 ;-------------------------------------------------------------
 ; LoseScreen
-; Purpose:   Clear the screen and show a red block-letter
+; Purpose:   Clear the screen and show a danger-red block-letter
 ;            "TIME UP" banner and the number of steps. Leaves
 ;            the cursor where AskPlayAgain should print.
 ; Receives:  nothing (uses steps)
@@ -1956,7 +1982,7 @@ WinScreen ENDP
 LoseScreen PROC USES eax edx
     call Clrscr                             ; clear the console
     INVOKE PrintArt, ADDR loseArt, ADDR loseColors, ART_LINES, BANNER_ROW, LOSE_COL ; red banner
-    mov  eax, white + (black * 16)          ; white text
+    mov  eax, C_WHITE                       ; white text
     call SetTextColor                       ; apply the colour
     mov  dh, INFO_ROW                       ; first info line
     mov  dl, INFO_COL                       ; info column
@@ -1986,7 +2012,7 @@ LoseScreen ENDP
 ;-------------------------------------------------------------
 AskPlayAgain PROC USES ecx edx
     INVOKE FlushConsoleInputBuffer, inputHandle ; forget keys pressed during the game
-    mov  eax, lightGray + (black * 16)      ; normal grey text
+    mov  eax, DEFAULT_ATTR                  ; normal grey text
     call SetTextColor                       ; apply the colour
     mov  edx, OFFSET againMsg               ; "Play again? (Y/N)"
     call WriteString                        ; print it
