@@ -66,7 +66,7 @@ WaitKeysReleased PROTO                      ; waits until keys are let go, sets 
 SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
 CastRay     PROTO, rayAngle:DWORD           ; EAX = distance (Q8), EDX = hitSide, ECX = 1 if exit
 GetWallColor PROTO, distance:DWORD, side:DWORD    ; EAX = wall colour for a distance
-GetFloorChar PROTO                          ; ECX = row in, EAX = floor character for that row
+GetFloorColor PROTO                         ; ECX = row in, EAX = floor colour for that row
 GetWallHeight PROTO                         ; EAX = distance in, EAX = wall height in rows
 DrawColumn  PROTO, column:DWORD, wallHeight:DWORD, wallColor:DWORD, rayAngle:DWORD ; draws one screen column
 IsStar      PROTO, rayAngle:DWORD           ; ECX = row in, EAX = 1 if a star is at this ceiling cell
@@ -195,7 +195,7 @@ shadeDist1  DWORD 512                       ; under 2 cells  -> level 0 (darkest
 shadeDist2  DWORD 1024                      ; under 4 cells  -> level 1
 shadeDist3  DWORD 2048                      ; under 8 cells  -> level 2, else level 3
 wallColors  BYTE lightCyan, cyan, lightBlue, blue  ; wall colours: nearest (brightest) first
-floorShades BYTE '#', 'x', '-', '.'         ; floor: nearest rows first
+floorColors BYTE yellow, brown, brown, gray ; floor colours: nearest rows first
 
 ; ---------- screen drawing data ----------
 frameBuffer   BYTE SCREEN_W * BUF_H DUP(' ')      ; 80x25 = 2000 chars, cell (row,col) at row*80 + col
@@ -1031,17 +1031,17 @@ HaveLevel:
 GetWallColor ENDP
 
 ;-------------------------------------------------------------
-; GetFloorChar
-; Purpose:   Pick the floor character for a screen row.
-;            Rows near the bottom are close to the player and
-;            get a dense character; higher rows are further.
+; GetFloorColor
+; Purpose:   Pick the floor colour for a screen row. Rows near
+;            the bottom are close to the player and are bright;
+;            higher rows are further away and darker.
 ;            level = (rows from bottom) / 3, max 3
-;            '#' (bottom 3 rows), 'x', '-', '.'
+;            yellow (bottom 3 rows), brown, brown, dark gray
 ; Receives:  ECX = screen row (0..23)
-; Returns:   EAX = floor character (in AL)
+; Returns:   EAX = floor colour attribute (in AL)
 ; Registers: EAX (EDX saved by USES)
 ;-------------------------------------------------------------
-GetFloorChar PROC USES edx
+GetFloorColor PROC USES edx
     mov  eax, SCREEN_H - 1                  ; EAX = 23 (bottom row)
     sub  eax, ecx                           ; EAX = rows from the bottom (0 = bottom)
     mov  edx, 0                             ; clear EDX before DIV
@@ -1053,9 +1053,9 @@ GetFloorChar PROC USES edx
     jbe  FloorLevelOK                       ; no
     mov  eax, 3                             ; yes: use the last level
 FloorLevelOK:
-    movzx eax, floorShades[eax]             ; EAX = floor character
+    movzx eax, floorColors[eax]             ; EAX = floor colour
     ret                                     ; back to caller
-GetFloorChar ENDP
+GetFloorColor ENDP
 
 ;-------------------------------------------------------------
 ; GetWallHeight
@@ -1081,7 +1081,8 @@ GetWallHeight ENDP
 ;-------------------------------------------------------------
 ; DrawColumn
 ; Purpose:   Fill one screen column, top to bottom:
-;            ceiling, wall (solid block in wallColor), floor.
+;            sky (with stars), wall (solid block in wallColor),
+;            floor (solid block, colour by distance).
 ;            The wall is centred vertically. Writes both the
 ;            character (frameBuffer) and the colour (attrBuffer).
 ; Receives:  column     = screen x (0..79)
@@ -1108,9 +1109,9 @@ ColumnRow:
     jb   PutCeiling                         ; yes: ceiling
     cmp  ecx, edx                           ; still inside the wall?
     jb   PutWall                            ; yes: wall
-    call GetFloorChar                       ; otherwise floor: AL = shade for row ECX
-    mov  [edi], al                          ; write the floor character
-    mov  WORD PTR [esi], DEFAULT_ATTR       ; normal colour
+    mov  BYTE PTR [edi], WALL_CHAR          ; otherwise floor: solid block
+    call GetFloorColor                      ; EAX = floor colour for row ECX
+    mov  [esi], ax                          ; store the colour
     jmp  NextRow                            ; done with this row
 PutCeiling:
     mov  BYTE PTR [edi], ' '                ; assume empty black sky
