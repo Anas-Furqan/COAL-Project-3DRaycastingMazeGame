@@ -60,6 +60,7 @@ KeyDown     PROTO, vKey:DWORD               ; EAX = 1 if key is held down now
 KeyPressed  PROTO, vKey:DWORD, prevPtr:PTR BYTE   ; EAX = 1 only on the frame the key goes down
 GetArrowChar PROTO                          ; AL = '>', 'v', '<' or '^' for the current angle
 WrapAngle   PROTO                           ; EAX = angle in, EAX = same angle wrapped to 0..359
+UpdateBlink PROTO                           ; blinkOn = 0 or 1, flips every 500 ms
 AnyKeyDown  PROTO                           ; EAX = 1 if any keyboard key is held
 WaitKeysReleased PROTO                      ; waits until keys are let go, sets mWasDown/qWasDown
 SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
@@ -102,6 +103,7 @@ RESULT_QUIT = 0                             ; GameLoop result: player pressed Q
 RESULT_WIN  = 1                             ; GameLoop result: player touched the exit
 RESULT_LOSE = 2                             ; GameLoop result: time ran out
 MS_PER_DAY  = 86400000                      ; GetMseconds restarts from 0 at midnight
+BLINK_MS    = 500                           ; blinking things change colour every 500 ms
 TIME_LIMIT  = 120                           ; seconds allowed to reach the exit
 
 ; ---------- HUD layout: where the numbers go inside the HUD row ----------
@@ -143,6 +145,7 @@ wonFlag     BYTE 0                          ; becomes 1 when the player touches 
 mWasDown    BYTE 0                          ; 1 if M was held last frame (for single press)
 qWasDown    BYTE 0                          ; 1 if Q was held last frame (for single press)
 inputHandle DWORD ?                         ; console input handle (set by InitInput)
+blinkOn     DWORD 0                         ; 0 / 1, flips every 500 ms (door, keys, title text)
 
 ; ---------- sine table: sinTable[d] = round(sin(d degrees) * 256) ----------
 sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
@@ -1122,6 +1125,24 @@ NextRow:
 DrawColumn ENDP
 
 ;-------------------------------------------------------------
+; UpdateBlink
+; Purpose:   Set blinkOn from the clock: (ms / 500) AND 1, so it
+;            is 0 for 500 ms, then 1 for 500 ms, and so on.
+; Receives:  nothing
+; Returns:   blinkOn = 0 or 1
+; Registers: none (EAX, ECX, EDX saved by USES)
+;-------------------------------------------------------------
+UpdateBlink PROC USES eax ecx edx
+    call GetMseconds                        ; EAX = milliseconds since midnight
+    mov  edx, 0                             ; clear EDX before DIV
+    mov  ecx, BLINK_MS                      ; divide by 500
+    div  ecx                                ; EAX = number of half seconds
+    and  eax, 1                             ; keep only the lowest bit: 0 or 1
+    mov  blinkOn, eax                       ; save the blink phase
+    ret                                     ; back to caller
+UpdateBlink ENDP
+
+;-------------------------------------------------------------
 ; RenderView
 ; Purpose:   Draw the 3D view: one ray per screen column.
 ;            rayAngle = angle - FOV/2 + x*FOV/SCREEN_W
@@ -1148,7 +1169,10 @@ ViewColumn:
     mov  ecx, eax                           ; ECX = wall colour
     jmp  HaveWallColor                      ; colour chosen
 ExitColumn:
-    mov  ecx, DOOR_COLOR_A                  ; ECX = door colour
+    mov  ecx, DOOR_COLOR_A                  ; ECX = door colour 1 (bright red)
+    cmp  blinkOn, 0                         ; first half of the blink?
+    je   HaveWallColor                      ; yes: keep colour 1
+    mov  ecx, DOOR_COLOR_B                  ; no: door colour 2 (yellow)
 HaveWallColor:
     pop  eax                                ; EAX = distance again
     call GetWallHeight                      ; EAX = wall height in rows
@@ -1430,6 +1454,7 @@ FrameLoop:
     call GetRemainingSec                    ; EAX = seconds left
     cmp  eax, 0                             ; time up?
     je   GameLost                           ; yes
+    call UpdateBlink                        ; blink phase for this frame
     call ClearBuffer                        ; blank frame
     call RenderView                         ; 3D walls into the buffer
     call DrawMinimap                        ; map + player on top (only if switched on)
