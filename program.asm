@@ -37,7 +37,7 @@ C_DOOR_A     = 10                           ; door colour 1 (red-orange)
 C_DOOR_B     = 11                           ; door colour 2, accent text (yellow-orange)
 C_GOLD       = 12                           ; keys, player arrow, win banner
 C_DANGER     = 13                           ; timer under 20 s, lose banner
-C_VIOLET     = 14                           ; logo second tone
+C_OUTLINE    = 14                           ; wall outline (top/bottom row), darkest mortar
 C_WHITE      = 15                           ; white (unchanged)
 
 ; ---------- FIXMUL macro: Q8 fixed-point multiply ----------
@@ -182,6 +182,7 @@ DOOR_COLOR_A   = C_DOOR_A                   ; exit door colour 1: slot 10 (red-o
 DOOR_COLOR_B   = C_DOOR_B                   ; exit door colour 2: slot 11 (yellow-orange)
 KEY_COLOR_A    = C_GOLD                     ; key pillar colour 1: slot 12 (gold)
 EDGE_ATTR      = C_SKY                      ; edge lines between walls: background colour
+OUTLINE_ATTR   = C_OUTLINE                  ; first and last row of a wall slice
 KEY_COLOR_B    = C_WHITE                    ; key pillar colour 2: slot 15 (white)
 HIT_WALL       = 0                          ; CastRay hit type: normal wall
 HIT_EXIT       = 1                          ; CastRay hit type: exit door
@@ -238,7 +239,7 @@ RGB_DOOR_A     = 002B6AFFh                  ; slot 10 door A             #FF6A2B
 RGB_DOOR_B     = 0047B3FFh                  ; slot 11 door B / accent    #FFB347 yellow-orange
 RGB_GOLD       = 004AD5FFh                  ; slot 12 keys / gold        #FFD54A
 RGB_DANGER     = 003D4DFFh                  ; slot 13 danger (timer<20s) #FF4D3D
-RGB_VIOLET     = 00FF5C7Ah                  ; slot 14 logo 2nd tone      #7A5CFF violet
+RGB_OUTLINE    = 00451F1Ah                  ; slot 14 wall outline       #1A1F45
 PAL_KEEP_TEXT  = 7                          ; slot 7 (light gray text) keeps its colour
 PAL_KEEP_WHITE = 15                         ; slot 15 (white) keeps its colour
 PAL_SLOTS      = 16                         ; the console has 16 colour slots
@@ -250,7 +251,7 @@ FORCE_FALLBACK = 0                          ; debug: 1 = pretend the palette cal
 themeColors DWORD RGB_SKY, RGB_WALL_3, RGB_WALL_2, RGB_WALL_1    ; slots 0-3
             DWORD RGB_WALL_0, RGB_FLOOR_FAR, RGB_FLOOR_MID, 0    ; slots 4-7 (7 is kept)
             DWORD RGB_FLOOR_NEAR, RGB_MAP_WALL, RGB_DOOR_A, RGB_DOOR_B ; slots 8-11
-            DWORD RGB_GOLD, RGB_DANGER, RGB_VIOLET, 0            ; slots 12-15 (15 is kept)
+            DWORD RGB_GOLD, RGB_DANGER, RGB_OUTLINE, 0           ; slots 12-15 (15 is kept)
 origInfo    CSBI_EX <>                      ; the console settings found at start (restored at exit)
 themeInfo   CSBI_EX <>                      ; the same settings with the theme colours
 paletteOK   DWORD 0                         ; 1 if the theme palette was installed
@@ -264,7 +265,7 @@ customRoles   BYTE 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ; custom
 fallbackRoles BYTE black, gray, gray, blue          ; sky, wall far, wall, wall
               BYTE lightBlue, black, black, lightGray ; wall near, floor far, floor mid, text
               BYTE gray, blue, lightRed, yellow     ; floor near/stars, map walls, door A, door B/accent
-              BYTE yellow, lightRed, lightMagenta, white ; gold, danger, violet, white
+              BYTE yellow, lightRed, gray, white    ; gold, danger, outline, white
 roleColors    BYTE PAL_SLOTS DUP(?)                 ; the active table (filled by LoadPalette)
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
 ; '#' = wall, '.' = floor, 'E' = exit, 'K' = key. Cell (row, col) is at
@@ -361,7 +362,7 @@ sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
 shadeDist1  DWORD 512                       ; under 2 cells  -> level 0 (darkest/solid)
 shadeDist2  DWORD 1024                      ; under 4 cells  -> level 1
 shadeDist3  DWORD 2048                      ; under 8 cells  -> level 2, else level 3
-wallColors  BYTE C_WALL_0, C_WALL_1, C_WALL_2, C_WALL_3 ; wall colours: nearest (brightest) first
+wallColors  BYTE C_WALL_0, C_WALL_1, C_WALL_2, C_WALL_3, C_OUTLINE ; wall shades near->far, then outline (darkest)
 floorColors BYTE C_FLOOR_NEAR, C_FLOOR_MID, C_FLOOR_FAR, C_FLOOR_FAR ; floor: nearest rows first
 
 ; ---------- screen drawing data ----------
@@ -391,7 +392,7 @@ loseArt BYTE "##### ##### #   # #####       #   # #### ", 0
         BYTE "  #     #   # # # ####        #   # #### ", 0
         BYTE "  #     #   #   # #           #   # #    ", 0
         BYTE "  #   ##### #   # #####        ###  #    ", 0
-logoColors BYTE C_WALL_0, C_WALL_1, C_VIOLET, C_VIOLET, C_VIOLET ; logo: blue (top) to violet (bottom)
+logoColors BYTE C_WALL_0, C_WALL_0, C_WALL_1, C_WALL_2, C_WALL_3 ; logo: light blue (top) to deep blue (bottom)
 winColors  BYTE 5 DUP(C_GOLD)                              ; win banner: gold
 loseColors BYTE 5 DUP(C_DANGER)                            ; lose banner: danger red
 subText    BYTE "A 3D RAYCASTING MAZE GAME IN x86 ASSEMBLY", 0 ; line under the logo
@@ -1709,6 +1710,8 @@ GetWallHeight ENDP
 ;            screen are simply not drawn (wallTop can be < 0).
 ;            Edge columns (IsEdgeColumn) draw the whole slice in
 ;            the edge colour, so walls are clearly separated.
+;            Plain wall slices get a dark outline on their first
+;            and last row (crisp silhouette).
 ; Receives:  column = screen x (0..79)
 ; Returns:   nothing (frameBuffer, attrBuffer changed)
 ; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
@@ -1718,6 +1721,7 @@ DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD
     LOCAL wallBottom:SDWORD                 ; first floor row (may be past the screen)
     LOCAL wallColor:DWORD                   ; colour of the wall slice
     LOCAL rayAng:DWORD                      ; ray angle of this column (for the stars)
+    LOCAL plainWall:DWORD                   ; 1 = normal wall slice (gets outline), 0 = edge/door/key
 
     ; ----- block 1: wall height and position -----
     mov  ebx, column                        ; EBX = column number
@@ -1732,9 +1736,17 @@ DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD
     add  edx, eax                           ; + height
     mov  wallBottom, edx                    ; first floor row
 
-    ; ----- block 2: wall colour -----
+    ; ----- block 2: wall colour, and is it a plain wall? -----
     INVOKE GetColumnColor, ebx              ; EAX = colour for this column's slice
     mov  wallColor, eax                     ; keep it
+    mov  plainWall, 0                       ; assume edge, door or key
+    cmp  colType[ebx], HIT_WALL             ; normal wall?
+    jne  KindDone                           ; no: door or key, keep it solid
+    INVOKE IsEdgeColumn, ebx                ; EAX = 1 for an edge column
+    cmp  eax, 0                             ; edge?
+    jne  KindDone                           ; yes: the edge line stays solid
+    mov  plainWall, 1                       ; plain wall: outline rows
+KindDone:
 
     ; ----- block 3: draw the 24 rows -----
     mov  edi, OFFSET frameBuffer            ; EDI = row 0 of the character buffer
@@ -1764,6 +1776,18 @@ PutCeiling:
 PutWall:
     mov  BYTE PTR [edi], WALL_CHAR          ; solid block
     mov  eax, wallColor                     ; AX = slice colour
+    cmp  plainWall, 0                       ; edge, door or key?
+    je   StoreWall                          ; yes: one solid colour
+    cmp  ecx, wallTop                       ; first row of the slice?
+    je   PutOutline                         ; yes: outline
+    mov  edx, wallBottom                    ; EDX = first floor row
+    dec  edx                                ; EDX = last wall row
+    cmp  ecx, edx                           ; last row of the slice?
+    je   PutOutline                         ; yes: outline
+    jmp  StoreWall                          ; inside the slice: wall colour
+PutOutline:
+    mov  eax, OUTLINE_ATTR                  ; dark outline against sky and floor
+StoreWall:
     mov  [esi], ax                          ; store the colour
 NextRow:
     add  edi, SCREEN_W                      ; down one row of characters (80 bytes)
