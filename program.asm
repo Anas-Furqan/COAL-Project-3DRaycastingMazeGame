@@ -312,7 +312,7 @@ VT_RED_POS     = 11                         ; vtTemplate: position of RR
 VT_GREEN_POS   = 14                         ; vtTemplate: position of GG
 VT_BLUE_POS    = 17                         ; vtTemplate: position of BB
 FORCE_FALLBACK = 0                          ; debug: 1 = pretend the palette call failed
-DEBUG_LOG      = 1                          ; debug: 1 = write wolf_debug.log next to the exe
+DEBUG_LOG      = 0                          ; debug: 1 = write wolf_debug.log next to the exe
 
 
 .data
