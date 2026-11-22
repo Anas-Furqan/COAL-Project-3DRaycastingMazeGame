@@ -14,11 +14,14 @@ come from a 360-entry lookup table. No FPU or SSE instructions.
 
 Everything is drawn in colour: every frame has a character buffer and
 a colour buffer (80 x 25 each) that are written to the console row by
-row. Walls are solid blocks whose colour shows the distance (light
-cyan = near, then cyan, light blue, blue = far; one side of each wall
-is a shade darker). The sky is black with stars that move as you
-turn, the floor fades from yellow (near) through brown to dark gray.
-The exit door blinks red/yellow and keys blink yellow/white.
+row. The game installs its own 16-colour console palette (a blue /
+orange theme) and puts the original colours back when it exits; if
+the console does not allow this, it runs with the standard colours.
+Walls are solid blocks in four blue/violet shades by distance (one
+side of each wall a shade darker), the sky is near-black with dim
+stars that move as you turn, and the floor fades from slate (near)
+to almost black (far). The exit door blinks red-orange/yellow-orange,
+keys blink gold/white, and the HUD key count is gold.
 
 HOW TO RUN (Visual Studio 2022)
 -------------------------------
