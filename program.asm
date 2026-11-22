@@ -176,6 +176,9 @@ KEY_WAIT_TRIES = 200                        ; max 200 x 10 ms = 2 s waiting for 
 CODE_PAGE_437  = 437                        ; old IBM PC character set (has the block characters)
 PIX_W          = VIEW_COLS                  ; pixel columns of the 3D view (one ray each)
 MIN_WALL_DIST  = 64                         ; distance used for wall height is at least 1/4 cell
+CONTACT_ROWS   = 2                          ; wall rows darkened at the bottom (contact shadow)
+FLOOR_SHADOW   = 2                          ; floor rows darkened under each wall
+SHADOW_ATTR    = C_FLOOR_FAR                ; colour of the floor shadow
 PIX_H          = VIEW_ROWS_CELLS * 2        ; pixel rows: two pixels per console cell
 HORIZON        = PIX_H / 2                  ; pixel row of the horizon
 HALF_BLOCK     = 223                        ; code page 437 upper half block
@@ -2442,6 +2445,13 @@ PixelRow:
     jl   PixSky                             ; yes: sky
     cmp  ecx, wallBottom                    ; inside the wall? (signed)
     jl   PixWall                            ; yes: wall
+    mov  edx, wallBottom                    ; EDX = first floor row
+    add  edx, FLOOR_SHADOW                  ; + 2 rows of shadow under the wall
+    cmp  ecx, edx                           ; inside the shadow? (signed)
+    jge  PixFloor                           ; no: normal floor
+    mov  eax, SHADOW_ATTR                   ; yes: darker floor under the wall
+    jmp  PixStore                           ; store it
+PixFloor:
     INVOKE GetFloorPixel, ebx               ; floor: EAX = colour for (column, row ECX)
     jmp  PixStore                           ; store it
 PixSky:
@@ -2506,6 +2516,8 @@ GetColumnKind ENDP
 ;                        joint where (wallX + shift) mod 64 < 6,
 ;                        shift = 32 on odd brick rows,
 ;                        mortar two shades darker than the brick
+;            light    -> top quarter one shade lighter, bottom 2
+;                        rows one shade darker (contact shadow)
 ;            stone    -> big blocks (16 rows x 128 wide), shift
 ;                        64 on odd rows, thin seams two shades
 ;                        darker, every second block one shade
@@ -2532,6 +2544,23 @@ NotEdgePix:
     je   DoorPix                            ; yes
     cmp  kind, KIND_KEY                     ; key?
     je   KeyPix                             ; yes
+    ; ----- light: top quarter one shade lighter, bottom 2 rows one darker -----
+    mov  edx, lineH                         ; EDX = height
+    shr  edx, 2                             ; a quarter of the height
+    cmp  texRow, edx                        ; in the top quarter?
+    jae  NotTopLight                        ; no
+    cmp  level, 0                           ; already the brightest?
+    je   NotTopLight                        ; yes
+    dec  level                              ; one shade lighter (level is our own copy)
+NotTopLight:
+    mov  edx, lineH                         ; EDX = height
+    sub  edx, CONTACT_ROWS + 1              ; first of the 2 rows above the outline row
+    cmp  texRow, edx                        ; near the bottom? (signed: EDX can be < 0)
+    jl   NotBottomShade                     ; no
+    cmp  level, 3                           ; already the darkest?
+    jae  NotBottomShade                     ; yes
+    inc  level                              ; one shade darker (contact shadow)
+NotBottomShade:
     ; ----- texture row: texY = texRow * 32 / lineH -----
     mov  eax, texRow                        ; EAX = row inside the slice
     imul eax, TEX_ROWS                      ; * 32 texture rows
