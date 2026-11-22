@@ -15,8 +15,13 @@ A first-person 3D raycasting maze game written in 32-bit x86 assembly (MASM + Ir
 - **Title, win and lose screens** – block-letter logo and banners, play again (Y/N).
 - **Integer maths only** – Q8 fixed point (value × 256), 360-entry sine table, no FPU or SSE.
 
-![3D view](screenshots/view.png)
-![Minimap](screenshots/minimap.png)
+| Corridor (3D view + minimap) | Key found |
+|---|---|
+| ![Corridor](screenshots/corridor.png) | ![Key](screenshots/key.png) |
+| **Door locked** | **Escaped!** |
+| ![Door locked](screenshots/door_locked.png) | ![Win](screenshots/win.png) |
+| **Time up** | |
+| ![Lose](screenshots/lose.png) | |
 
 ## Controls
 
@@ -50,7 +55,7 @@ msbuild "COAL Project.slnx" /p:Configuration=Debug /p:Platform=x86
 "Debug\COAL Project.exe"
 ```
 
-The game resizes its console window to 100 × 31 characters. It is designed for the classic console host (conhost); in Windows Terminal the palette and window size may stay unchanged and the standard colours are used.
+The game resizes its console window to 100 × 31 characters. In the classic console host the palette is set with `SetConsoleScreenBufferInfoEx`; in Windows Terminal (also used by F5 in Visual Studio) it is set with VT escape sequences (OSC 4) and reset on exit.
 
 ## How it works
 
@@ -60,7 +65,7 @@ The game resizes its console window to 100 × 31 characters. It is designed for 
 - **Wall slice:** height = `PIX_H · 256 / distance`, centred on the horizon. Texture coordinates (`wallX` along the wall, `texY` down the slice) select brick, mortar, stone or seam colours; the distance picks one of four shades.
 - **Half-block rendering:** the view is drawn into a pixel buffer (one colour role per pixel). Each console cell combines two pixels: character 223 (upper half block), top pixel = foreground colour, bottom pixel = background colour. The composed `CHAR_INFO` buffer, together with the HUD row and the minimap overlay, is written with one `WriteConsoleOutput` call.
 - **Palette:** colours are *roles* (sky, brick 0–3, stone 0–3, floor, door, gold …). A role table maps them either to the custom palette slots or to standard colours if the palette cannot be changed.
-- **Collision:** X and Y are tested separately with a small margin, so the player slides along walls.
+- **Collision:** the player is a square box (radius 0.31 cell); all four corners are tested, X and Y separately, so the player slides along walls and never gets too close to a corner. In corridors the player is gently nudged towards the centre, and turning accelerates from 2° to 5° per frame.
 
 ## Team
 
