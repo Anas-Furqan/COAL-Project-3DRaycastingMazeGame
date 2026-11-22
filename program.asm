@@ -38,6 +38,7 @@ SetConsoleOutputCP PROTO, wCodePageID:DWORD ; (kernel32.lib) choose which charac
 GetSin      PROTO                           ; EAX = angle in, EAX = sin*256 out
 GetCos      PROTO                           ; EAX = angle in, EAX = cos*256 out
 TitleScreen PROTO                           ; shows the title screen, EAX = key pressed
+PrintArt    PROTO, artPtr:PTR BYTE, colorPtr:PTR BYTE, lines:DWORD, row:DWORD, col:DWORD ; coloured text lines, '#' = block
 ResetGame   PROTO                           ; puts the player at the start, restarts the timer
 GetElapsedSec PROTO                         ; EAX = seconds since the game started
 GetRemainingSec PROTO                       ; EAX = seconds left (0 if time is up)
@@ -93,6 +94,25 @@ WALL_CHAR      = 219                        ; code page 437 full block: every wa
 STAR_CHAR      = '.'                        ; a star in the night sky
 STAR_ATTR      = gray + (black * 16)        ; stars are dim dark gray
 STAR_MOD       = 37                         ; star if (rayAngle*7 + row*13) mod 37 = 0
+
+; ---------- title / end screen layout (row, column on the console) ----------
+ART_LINES   = 5                             ; block letters are 5 rows tall
+BOX_LINES   = 10                            ; controls box: top, 8 text lines, bottom
+LOGO_ROW    = 1                             ; logo rows 1..5
+LOGO_COL    = 19                            ; (80 - 41) / 2: logo centred
+SUB_ROW     = 7                             ; subtitle row
+SUB_COL     = 19                            ; (80 - 41) / 2: subtitle centred
+BOX_ROW     = 9                             ; controls box rows 9..18
+BOX_COL     = 17                            ; (80 - 46) / 2: box centred
+PRESS_ROW   = 21                            ; blinking prompt row
+PRESS_COL   = 33                            ; (80 - 13) / 2: prompt centred
+TITLE_DELAY = 50                            ; ms between title screen redraws
+BANNER_ROW  = 2                             ; end screen banner rows 2..6
+WIN_COL     = 16                            ; (80 - 47) / 2: "ESCAPED!" centred
+LOSE_COL    = 19                            ; (80 - 41) / 2: "TIME UP" centred
+INFO_ROW    = 9                             ; first line of time / steps
+INFO_COL    = 19                            ; column of the info lines
+ASK_ROW     = 13                            ; row of "Play again? (Y/N)"
 
 ; ---------- minimap look ----------
 MAP_BOX       = MAP_H + 1                   ; border row/column on the far side (17)
@@ -226,27 +246,48 @@ cursorInfo    CONSOLE_CURSOR_INFO <100, 0>  ; cursor size 100%, bVisible = 0 (hi
 drawPos       COORD <0, 0>                  ; screen position (0,0) where drawing starts
 charsWritten  DWORD ?                       ; Windows stores how many chars it wrote here
 
-; ---------- title screen text ----------
-titleLine1 BYTE "==============================", 0   ; top border
-titleLine2 BYTE "           WOLF-86            ", 0   ; game name
-titleLine3 BYTE "   A 3D Raycasting Maze Game  ", 0   ; subtitle
-titleLine4 BYTE "==============================", 0   ; bottom border
-ctrlHead   BYTE "CONTROLS:", 0                       ; controls heading
-ctrlMove   BYTE "  W / S  - move forward / back", 0  ; movement keys
-ctrlTurn   BYTE "  A / D  - turn left / right", 0    ; turning keys
-ctrlMap    BYTE "  M      - show / hide minimap", 0  ; minimap key
-ctrlQuit   BYTE "  Q      - quit", 0                 ; quit key
-goalHead   BYTE "GOAL:", 0                           ; goal heading
-goalText   BYTE "  Reach the exit (E) before time runs out!", 0 ; goal text
-pressKey   BYTE "Press any key to start...", 0       ; prompt
+; ---------- title screen ----------
+; ---------- WOLF-86 in block letters ('#' is printed as a solid block) ----------
+logoArt BYTE "#   #  ###  #     #####        ###   ### ", 0
+        BYTE "#   # #   # #     #           #   # #    ", 0
+        BYTE "# # # #   # #     ####   ###   ###  #### ", 0
+        BYTE "## ## #   # #     #           #   # #   #", 0
+        BYTE "#   #  ###  ##### #            ###   ### ", 0
+; ---------- ESCAPED! in block letters ('#' is printed as a solid block) ----------
+winArt BYTE "#####  ####  ####  ###  ####  ##### ####    #  ", 0
+       BYTE "#     #     #     #   # #   # #     #   #   #  ", 0
+       BYTE "####   ###  #     ##### ####  ####  #   #   #  ", 0
+       BYTE "#         # #     #   # #     #     #   #      ", 0
+       BYTE "##### ####   #### #   # #     ##### ####    #  ", 0
+; ---------- TIME UP in block letters ('#' is printed as a solid block) ----------
+loseArt BYTE "##### ##### #   # #####       #   # #### ", 0
+        BYTE "  #     #   ## ## #           #   # #   #", 0
+        BYTE "  #     #   # # # ####        #   # #### ", 0
+        BYTE "  #     #   #   # #           #   # #    ", 0
+        BYTE "  #   ##### #   # #####        ###  #    ", 0
+logoColors BYTE yellow, yellow, lightRed, lightRed, red       ; one colour per logo line
+winColors  BYTE 5 DUP(lightGreen)                          ; banner colours: all green
+loseColors BYTE 5 DUP(lightRed)                            ; banner colours: all red
+subText    BYTE "A 3D RAYCASTING MAZE GAME IN x86 ASSEMBLY", 0 ; line under the logo
+; ---------- controls box (code page 437 double-line box) ----------
+ctrlBox BYTE 201, 44 DUP(205), 187, 0
+        BYTE 186, "  CONTROLS                                  ", 186, 0
+        BYTE 186, "  W / S   move forward / back               ", 186, 0
+        BYTE 186, "  A / D   turn left / right                 ", 186, 0
+        BYTE 186, "  M       show / hide minimap               ", 186, 0
+        BYTE 186, "  Q       quit                              ", 186, 0
+        BYTE 186, "                                            ", 186, 0
+        BYTE 186, "  GOAL: reach the exit (E) before the       ", 186, 0
+        BYTE 186, "        timer runs out!                     ", 186, 0
+        BYTE 200, 44 DUP(205), 188, 0
+boxColors  BYTE lightCyan, 8 DUP(white), lightCyan         ; border lines cyan, text white
+pressKey   BYTE "PRESS ANY KEY", 0                         ; blinking prompt
 
 ; ---------- HUD text (numbers are filled in each frame) ----------
 hudTemplate BYTE "TIME 00:00  STEPS 00000  W/S move  A/D turn  M map  Q quit"
 HUD_LEN = ($ - hudTemplate)                 ; number of characters in the template
 
 ; ---------- end screen text ----------
-winTitle   BYTE "*** YOU ESCAPED! ***", 0                 ; win heading
-loseTitle  BYTE "*** TIME'S UP! ***", 0                   ; lose heading
 loseText   BYTE "You did not reach the exit in time.", 0  ; lose message
 timeMsg    BYTE "Time taken: ", 0                         ; label before mm:ss
 stepsMsg   BYTE "Steps:      ", 0                         ; label before the step count
@@ -327,66 +368,92 @@ GetCos ENDP
 
 ;-------------------------------------------------------------
 ; TitleScreen
-; Purpose:   Clear the screen, show the game name, controls
-;            and goal, then wait for a key press.
+; Purpose:   Clear the screen and show the block-letter logo,
+;            a subtitle and the controls box, then blink
+;            "PRESS ANY KEY" until a key is pressed (ReadKey
+;            does not wait, so the loop keeps blinking).
 ; Receives:  nothing
 ; Returns:   EAX = the key that was pressed (in AL)
 ; Registers: EAX (EDX saved by USES)
 ;-------------------------------------------------------------
 TitleScreen PROC USES edx
     call Clrscr                             ; clear the console
-
-    mov  eax, yellow + (black * 16)         ; yellow text on black background
-    call SetTextColor                       ; apply the colour
-    mov  edx, OFFSET titleLine1             ; top border
+    INVOKE PrintArt, ADDR logoArt, ADDR logoColors, ART_LINES, LOGO_ROW, LOGO_COL ; big logo
+    mov  eax, lightCyan + (black * 16)      ; subtitle colour
+    call SetTextColor                       ; apply it
+    mov  dh, SUB_ROW                        ; row of the subtitle
+    mov  dl, SUB_COL                        ; column of the subtitle
+    call Gotoxy                             ; move the cursor there
+    mov  edx, OFFSET subText                ; subtitle text
     call WriteString                        ; print it
-    call Crlf                               ; next line
-    mov  edx, OFFSET titleLine2             ; game name
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    mov  edx, OFFSET titleLine3             ; subtitle
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    mov  edx, OFFSET titleLine4             ; bottom border
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    call Crlf                               ; blank line
-
-    mov  eax, white + (black * 16)          ; white text on black background
-    call SetTextColor                       ; apply the colour
-    mov  edx, OFFSET ctrlHead               ; "CONTROLS:"
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    mov  edx, OFFSET ctrlMove               ; W / S line
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    mov  edx, OFFSET ctrlTurn               ; A / D line
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    mov  edx, OFFSET ctrlMap                ; M line
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    mov  edx, OFFSET ctrlQuit               ; Q line
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    call Crlf                               ; blank line
-
-    mov  edx, OFFSET goalHead               ; "GOAL:"
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    mov  edx, OFFSET goalText               ; goal description
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    call Crlf                               ; blank line
-
-    mov  eax, lightGray + (black * 16)      ; normal grey text
-    call SetTextColor                       ; apply the colour
-    mov  edx, OFFSET pressKey               ; "Press any key..."
-    call WriteString                        ; print it
-    call ReadChar                           ; wait for a key (key code goes to AL)
+    INVOKE PrintArt, ADDR ctrlBox, ADDR boxColors, BOX_LINES, BOX_ROW, BOX_COL ; controls box
+TitleWait:
+    call UpdateBlink                        ; blinkOn = 0 or 1 from the clock
+    mov  eax, yellow + (black * 16)         ; bright prompt
+    cmp  blinkOn, 0                         ; first half of the blink?
+    je   PromptColor                        ; yes: keep yellow
+    mov  eax, gray + (black * 16)           ; no: dim dark gray
+PromptColor:
+    call SetTextColor                       ; apply the prompt colour
+    mov  dh, PRESS_ROW                      ; row of the prompt
+    mov  dl, PRESS_COL                      ; column of the prompt
+    call Gotoxy                             ; move the cursor there
+    mov  edx, OFFSET pressKey               ; "PRESS ANY KEY"
+    call WriteString                        ; print it in this frame's colour
+    mov  eax, TITLE_DELAY                   ; 50 ms
+    call Delay                              ; short wait so the CPU is not busy
+    call ReadKey                            ; key waiting? (does not wait) ZF = 1 if none
+    jz   TitleWait                          ; no key: keep blinking
     movzx eax, al                           ; EAX = just the key code
+    push eax                                ; keep the key
+    mov  eax, DEFAULT_ATTR                  ; back to normal colours
+    call SetTextColor                       ; apply them
+    pop  eax                                ; EAX = key again
     ret                                     ; back to caller
 TitleScreen ENDP
+
+;-------------------------------------------------------------
+; PrintArt
+; Purpose:   Print several 0-terminated text lines, one under
+;            the other, starting at (row, col). Each line has
+;            its own colour. A '#' is printed as a solid block
+;            (219), so block letters can be typed with '#'.
+; Receives:  artPtr   = address of the first line
+;            colorPtr = address of one colour byte per line
+;            lines    = number of lines
+;            row, col = screen position of the first line
+; Returns:   nothing (console changed)
+; Registers: none (EAX, ECX, EDX, ESI, EDI saved by USES)
+;-------------------------------------------------------------
+PrintArt PROC USES eax ecx edx esi edi, artPtr:PTR BYTE, colorPtr:PTR BYTE, lines:DWORD, row:DWORD, col:DWORD
+    mov  esi, artPtr                        ; ESI = next character to print
+    mov  edi, colorPtr                      ; EDI = colour of the current line
+    mov  ecx, lines                         ; ECX = lines left
+ArtLine:
+    movzx eax, BYTE PTR [edi]               ; EAX = colour of this line
+    call SetTextColor                       ; apply it
+    inc  edi                                ; next line's colour
+    mov  eax, row                           ; EAX = row of this line
+    mov  dh, al                             ; DH = row
+    mov  eax, col                           ; EAX = column
+    mov  dl, al                             ; DL = column
+    call Gotoxy                             ; move the cursor to the line start
+ArtChar:
+    mov  al, [esi]                          ; AL = next character
+    inc  esi                                ; move past it
+    cmp  al, 0                              ; end of this line?
+    je   ArtLineDone                        ; yes
+    cmp  al, '#'                            ; block-letter marker?
+    jne  ArtPut                             ; no: print as it is
+    mov  al, WALL_CHAR                      ; yes: print a solid block instead
+ArtPut:
+    call WriteChar                          ; print the character
+    jmp  ArtChar                            ; next character
+ArtLineDone:
+    inc  row                                ; next line goes one row lower
+    loop ArtLine                            ; ECX--, repeat for every line
+    ret                                     ; back to caller
+PrintArt ENDP
 
 ;-------------------------------------------------------------
 ; ClearBuffer
@@ -1506,63 +1573,68 @@ PrintTime ENDP
 
 ;-------------------------------------------------------------
 ; WinScreen
-; Purpose:   Clear the screen and show the win message, the
-;            time taken (mm:ss) and the number of steps.
+; Purpose:   Clear the screen and show a green block-letter
+;            "ESCAPED!" banner, the time taken (mm:ss) and the
+;            number of steps. Leaves the cursor where
+;            AskPlayAgain should print its question.
 ; Receives:  nothing (uses timer and steps)
 ; Returns:   nothing
 ; Registers: none (EAX, EDX saved by USES)
 ;-------------------------------------------------------------
 WinScreen PROC USES eax edx
     call Clrscr                             ; clear the console
-    mov  eax, lightGreen + (black * 16)     ; green text
-    call SetTextColor                       ; apply the colour
-    mov  edx, OFFSET winTitle               ; "*** YOU ESCAPED! ***"
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    call Crlf                               ; blank line
+    INVOKE PrintArt, ADDR winArt, ADDR winColors, ART_LINES, BANNER_ROW, WIN_COL ; green banner
     mov  eax, white + (black * 16)          ; white text
     call SetTextColor                       ; apply the colour
+    mov  dh, INFO_ROW                       ; first info line
+    mov  dl, INFO_COL                       ; info column
+    call Gotoxy                             ; move the cursor there
     mov  edx, OFFSET timeMsg                ; "Time taken: "
     call WriteString                        ; print it
     call GetElapsedSec                      ; EAX = seconds used
     call PrintTime                          ; print mm:ss
-    call Crlf                               ; next line
+    mov  dh, INFO_ROW + 1                   ; second info line
+    mov  dl, INFO_COL                       ; info column
+    call Gotoxy                             ; move the cursor there
     mov  edx, OFFSET stepsMsg               ; "Steps: "
     call WriteString                        ; print it
     mov  eax, steps                         ; EAX = step count
     call WriteDec                           ; print it
-    call Crlf                               ; next line
-    call Crlf                               ; blank line
+    mov  dh, ASK_ROW                        ; row for "Play again?"
+    mov  dl, INFO_COL                       ; info column
+    call Gotoxy                             ; leave the cursor there
     ret                                     ; back to caller
 WinScreen ENDP
 
 ;-------------------------------------------------------------
 ; LoseScreen
-; Purpose:   Clear the screen and show the time's-up message
-;            and the number of steps.
+; Purpose:   Clear the screen and show a red block-letter
+;            "TIME UP" banner and the number of steps. Leaves
+;            the cursor where AskPlayAgain should print.
 ; Receives:  nothing (uses steps)
 ; Returns:   nothing
 ; Registers: none (EAX, EDX saved by USES)
 ;-------------------------------------------------------------
 LoseScreen PROC USES eax edx
     call Clrscr                             ; clear the console
-    mov  eax, lightRed + (black * 16)       ; red text
-    call SetTextColor                       ; apply the colour
-    mov  edx, OFFSET loseTitle              ; "*** TIME'S UP! ***"
-    call WriteString                        ; print it
-    call Crlf                               ; next line
-    call Crlf                               ; blank line
+    INVOKE PrintArt, ADDR loseArt, ADDR loseColors, ART_LINES, BANNER_ROW, LOSE_COL ; red banner
     mov  eax, white + (black * 16)          ; white text
     call SetTextColor                       ; apply the colour
+    mov  dh, INFO_ROW                       ; first info line
+    mov  dl, INFO_COL                       ; info column
+    call Gotoxy                             ; move the cursor there
     mov  edx, OFFSET loseText               ; "You did not reach the exit in time."
     call WriteString                        ; print it
-    call Crlf                               ; next line
+    mov  dh, INFO_ROW + 1                   ; second info line
+    mov  dl, INFO_COL                       ; info column
+    call Gotoxy                             ; move the cursor there
     mov  edx, OFFSET stepsMsg               ; "Steps: "
     call WriteString                        ; print it
     mov  eax, steps                         ; EAX = step count
     call WriteDec                           ; print it
-    call Crlf                               ; next line
-    call Crlf                               ; blank line
+    mov  dh, ASK_ROW                        ; row for "Play again?"
+    mov  dl, INFO_COL                       ; info column
+    call Gotoxy                             ; leave the cursor there
     ret                                     ; back to caller
 LoseScreen ENDP
 
