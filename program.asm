@@ -73,7 +73,10 @@ IsStar      PROTO, rayAngle:DWORD           ; ECX = row in, EAX = 1 if a star is
 RenderView  PROTO                           ; casts 80 rays and draws the 3D view
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
 HandleInput PROTO                           ; reads one key (no waiting) and acts on it
-DrawMinimap PROTO                           ; copies map + direction arrow into the frame buffer
+DrawMinimap PROTO                           ; coloured map + border + direction arrow into the frame
+DrawMapBorder PROTO                         ; box around the minimap
+GetMapLook  PROTO                           ; EAX = map char in, EAX = screen char, EBX = colour out
+PutCell     PROTO, row:DWORD, col:DWORD, cellChar:DWORD, cellAttr:DWORD ; one char + colour into the frame
 GameLoop    PROTO                           ; main loop, EAX = RESULT_QUIT / WIN / LOSE
 
 ; ---------- movement settings ----------
@@ -90,6 +93,20 @@ WALL_CHAR      = 219                        ; code page 437 full block: every wa
 STAR_CHAR      = '.'                        ; a star in the night sky
 STAR_ATTR      = gray + (black * 16)        ; stars are dim dark gray
 STAR_MOD       = 37                         ; star if (rayAngle*7 + row*13) mod 37 = 0
+
+; ---------- minimap look ----------
+MAP_BOX       = MAP_H + 1                   ; border row/column on the far side (17)
+BOX_TL        = 218                         ; code page 437 box corners and lines
+BOX_TR        = 191                         ; top-right corner
+BOX_BL        = 192                         ; bottom-left corner
+BOX_BR        = 217                         ; bottom-right corner
+BOX_H         = 196                         ; horizontal line
+BOX_V         = 179                         ; vertical line
+BORDER_ATTR   = lightGray + (black * 16)    ; border colour
+MAP_WALL_ATTR = gray + (black * 16)         ; walls: dark gray
+MAP_EXIT_ATTR = lightRed + (black * 16)     ; exit: red
+MAP_KEY_ATTR  = yellow + (black * 16)       ; keys: yellow
+PLAYER_ATTR   = yellow + (black * 16)       ; player arrow: bright yellow
 DOOR_COLOR_A   = lightRed + (black * 16)    ; exit door colour 1 (bright red)
 DOOR_COLOR_B   = yellow + (black * 16)      ; exit door colour 2 (yellow)
 DEFAULT_ATTR   = lightGray + (black * 16)   ; normal colour: light gray text on black
@@ -114,6 +131,10 @@ TIME_LIMIT  = 120                           ; seconds allowed to reach the exit
 HUD_MIN_POS  = 5                            ; "TIME mm:ss": minutes start at column 5
 HUD_SEC_POS  = 8                            ; seconds start at column 8
 HUD_STEP_POS = 18                           ; "STEPS nnnnn": steps start at column 18
+HUD_TIME_LEN = 10                           ; "TIME mm:ss" is 10 characters
+LOW_TIME     = 20                           ; timer turns red below 20 seconds
+TIMER_ATTR     = white + (black * 16)       ; timer colour: bright white
+TIMER_LOW_ATTR = lightRed + (black * 16)    ; timer colour when time is short: bright red
 
 .data
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
@@ -799,35 +820,126 @@ ArrowUp:
 GetArrowChar ENDP
 
 ;-------------------------------------------------------------
-; DrawMinimap
-; Purpose:   If showMinimap = 1, copy the 16x16 map into the
-;            top-left of frameBuffer and put a direction arrow
-;            on the player's cell.
-; Receives:  nothing (uses gameMap, posX, posY)
-; Returns:   nothing
-; Registers: none (EAX, ECX, EDX, ESI, EDI saved by USES)
+; PutCell
+; Purpose:   Write one character and its colour into the frame
+;            (frameBuffer and attrBuffer) at (row, col).
+; Receives:  row, col  = screen position (row 0..24, col 0..79)
+;            cellChar  = character (low byte used)
+;            cellAttr  = colour attribute (low word used)
+; Returns:   nothing (frameBuffer, attrBuffer changed)
+; Registers: none (EAX, EBX saved by USES)
 ;-------------------------------------------------------------
-DrawMinimap PROC USES eax ecx edx esi edi
+PutCell PROC USES eax ebx, row:DWORD, col:DWORD, cellChar:DWORD, cellAttr:DWORD
+    mov  eax, row                           ; EAX = row
+    imul eax, SCREEN_W                      ; EAX = row * 80
+    add  eax, col                           ; EAX = row*80 + col = cell number
+    mov  ebx, cellChar                      ; BL = character
+    mov  frameBuffer[eax], bl               ; store it (indexed addressing)
+    mov  ebx, cellAttr                      ; BX = colour
+    mov  attrBuffer[eax*2], bx              ; store it (scaled index: 2 bytes per colour)
+    ret                                     ; back to caller
+PutCell ENDP
+
+;-------------------------------------------------------------
+; GetMapLook
+; Purpose:   Choose how one map cell looks on the minimap.
+;            '#' -> dark gray block, 'E' -> red E,
+;            'K' -> yellow K, anything else -> black space.
+; Receives:  EAX = map character (in AL)
+; Returns:   EAX = screen character, EBX = colour attribute
+; Registers: EAX, EBX
+;-------------------------------------------------------------
+GetMapLook PROC
+    cmp  al, '#'                            ; wall?
+    je   LookWall                           ; yes
+    cmp  al, 'E'                            ; exit?
+    je   LookExit                           ; yes
+    cmp  al, 'K'                            ; key?
+    je   LookKey                            ; yes
+    mov  eax, ' '                           ; floor: empty
+    mov  ebx, DEFAULT_ATTR                  ; on black
+    ret                                     ; back to caller
+LookWall:
+    mov  eax, WALL_CHAR                     ; solid block
+    mov  ebx, MAP_WALL_ATTR                 ; dark gray
+    ret                                     ; back to caller
+LookExit:
+    mov  eax, 'E'                           ; letter E
+    mov  ebx, MAP_EXIT_ATTR                 ; red
+    ret                                     ; back to caller
+LookKey:
+    mov  eax, 'K'                           ; letter K
+    mov  ebx, MAP_KEY_ATTR                  ; yellow
+    ret                                     ; back to caller
+GetMapLook ENDP
+
+;-------------------------------------------------------------
+; DrawMapBorder
+; Purpose:   Draw a single-line box around the minimap:
+;            rows 0 and 17, columns 0 and 17 of the screen.
+; Receives:  nothing
+; Returns:   nothing (frameBuffer, attrBuffer changed)
+; Registers: none (ECX saved by USES)
+;-------------------------------------------------------------
+DrawMapBorder PROC USES ecx
+    INVOKE PutCell, 0, 0, BOX_TL, BORDER_ATTR             ; top-left corner
+    INVOKE PutCell, 0, MAP_BOX, BOX_TR, BORDER_ATTR       ; top-right corner
+    INVOKE PutCell, MAP_BOX, 0, BOX_BL, BORDER_ATTR       ; bottom-left corner
+    INVOKE PutCell, MAP_BOX, MAP_BOX, BOX_BR, BORDER_ATTR ; bottom-right corner
+    mov  ecx, 1                             ; ECX = 1..16 along each side
+BorderLoop:
+    INVOKE PutCell, 0, ecx, BOX_H, BORDER_ATTR       ; top edge
+    INVOKE PutCell, MAP_BOX, ecx, BOX_H, BORDER_ATTR ; bottom edge
+    INVOKE PutCell, ecx, 0, BOX_V, BORDER_ATTR       ; left edge
+    INVOKE PutCell, ecx, MAP_BOX, BOX_V, BORDER_ATTR ; right edge
+    inc  ecx                                ; next position
+    cmp  ecx, MAP_BOX                       ; done 1..16?
+    jb   BorderLoop                         ; no: continue
+    ret                                     ; back to caller
+DrawMapBorder ENDP
+
+;-------------------------------------------------------------
+; DrawMinimap
+; Purpose:   If showMinimap = 1, draw the 16x16 map in colour
+;            inside a border at the top-left of the frame, and a
+;            yellow direction arrow on the player's cell.
+;            Map cell (r, c) goes to screen (r+1, c+1).
+; Receives:  nothing (uses gameMap, posX, posY)
+; Returns:   nothing (frameBuffer, attrBuffer changed)
+; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
+;-------------------------------------------------------------
+DrawMinimap PROC USES eax ebx ecx edx esi edi
     cmp  showMinimap, 0                     ; is the minimap hidden?
     je   MapDone                            ; yes: draw nothing
-    cld                                     ; copy forwards
-    mov  esi, OFFSET gameMap                ; ESI = source (map row 0)
-    mov  edi, OFFSET frameBuffer            ; EDI = destination (screen row 0, col 0)
-    mov  edx, MAP_H                         ; EDX = 16 rows to copy
-CopyRow:
-    mov  ecx, MAP_W                         ; ECX = 16 bytes in one map row
-    rep  movsb                              ; copy [ESI] -> [EDI], 16 times (both move on)
-    add  edi, SCREEN_W - MAP_W              ; skip the other 64 screen columns to the next row
-    dec  edx                                ; one row done
-    jnz  CopyRow                            ; more rows left: copy the next
-    mov  ecx, posY                          ; ECX = Y in Q8
-    sar  ecx, 8                             ; ECX = player row
-    imul ecx, SCREEN_W                      ; ECX = row * 80 (start of that screen row)
-    mov  edx, posX                          ; EDX = X in Q8
-    sar  edx, 8                             ; EDX = player column
-    add  ecx, edx                           ; ECX = row*80 + col
-    call GetArrowChar                       ; AL = arrow for the facing direction
-    mov  frameBuffer[ecx], al               ; draw the arrow on the player's cell
+    call DrawMapBorder                      ; the box around the map
+    mov  edx, 0                             ; EDX = map row
+MapRow:
+    mov  ecx, 0                             ; ECX = map column
+MapCol:
+    mov  eax, edx                           ; EAX = row
+    shl  eax, 4                             ; row * 16
+    add  eax, ecx                           ; row*16 + col
+    movzx eax, gameMap[eax]                 ; AL = map character
+    call GetMapLook                         ; EAX = screen char, EBX = colour
+    mov  esi, edx                           ; ESI = row
+    inc  esi                                ; +1 for the border
+    mov  edi, ecx                           ; EDI = column
+    inc  edi                                ; +1 for the border
+    INVOKE PutCell, esi, edi, eax, ebx      ; draw the cell
+    inc  ecx                                ; next column
+    cmp  ecx, MAP_W                         ; all 16 columns?
+    jb   MapCol                             ; no: continue
+    inc  edx                                ; next row
+    cmp  edx, MAP_H                         ; all 16 rows?
+    jb   MapRow                             ; no: continue
+    mov  esi, posY                          ; ESI = Y in Q8
+    sar  esi, 8                             ; player row
+    inc  esi                                ; +1 for the border
+    mov  edi, posX                          ; EDI = X in Q8
+    sar  edi, 8                             ; player column
+    inc  edi                                ; +1 for the border
+    call GetArrowChar                       ; EAX = arrow for the facing direction
+    INVOKE PutCell, esi, edi, eax, PLAYER_ATTR ; bright yellow arrow
 MapDone:
     ret                                     ; back to caller
 DrawMinimap ENDP
@@ -1314,6 +1426,8 @@ PutNumber ENDP
 ; Purpose:   Fill the HUD row (row 24) of frameBuffer:
 ;            "TIME mm:ss  STEPS nnnnn  W/S move ..."
 ;            Copy the template, then write the numbers in.
+;            The timer is bright white (red under 20 s), the
+;            rest keeps the normal light gray.
 ; Receives:  nothing (uses steps and the timer)
 ; Returns:   nothing (frameBuffer HUD row changed)
 ; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
@@ -1338,6 +1452,16 @@ DrawHUD PROC USES eax ebx ecx edx esi edi
     mov  ecx, edi                           ; ECX = HUD row start
     add  ecx, HUD_STEP_POS                  ; ECX = where the steps go
     INVOKE PutNumber, ecx, steps, 5         ; write the step count (5 digits)
+    call GetRemainingSec                    ; EAX = seconds left
+    mov  edx, TIMER_ATTR                    ; assume plenty of time: bright white
+    cmp  eax, LOW_TIME                      ; under 20 seconds left?
+    jae  HaveTimerColor                     ; no: keep white
+    mov  edx, TIMER_LOW_ATTR                ; yes: bright red warning
+HaveTimerColor:
+    mov  eax, edx                           ; AX = timer colour
+    mov  edi, OFFSET attrBuffer + HUD_ROW * SCREEN_W * 2 ; EDI = colours of the HUD row
+    mov  ecx, HUD_TIME_LEN                  ; ECX = "TIME mm:ss" = 10 cells
+    rep  stosw                              ; colour the timer (rest of the row stays light gray)
     ret                                     ; back to caller
 DrawHUD ENDP
 
