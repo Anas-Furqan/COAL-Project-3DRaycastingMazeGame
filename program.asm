@@ -115,6 +115,10 @@ LogInfo     PROTO, infoPtr:PTR CSBI_EX      ; debug: buffer size, window rect, c
 LoadPalette PROTO                           ; saves the console palette, installs the blue/orange theme
 RestorePalette PROTO                        ; puts the saved palette back
 SetPalette  PROTO, infoPtr:PTR CSBI_EX      ; EAX = 1 if the palette in *infoPtr was applied
+TryConhostPalette PROTO                     ; EAX = 1 if the theme is set and read back correctly
+IsPseudoConsole PROTO                       ; EAX = 1 in Windows Terminal (pseudo console)
+SetPaletteVT PROTO                          ; theme colours via VT sequences (Windows Terminal)
+PutHex2     PROTO, dest:PTR BYTE, value:DWORD ; two hex digits
 SetRoleColor PROTO                          ; EAX = colour role in, sets the console text colour
 ComposeFrame PROTO                          ; pixels + text -> CHAR_INFO buffer -> one WriteConsoleOutput
 WriteConsoleOutputA PROTO, hConsole:DWORD, lpBuffer:PTR DWORD, dwBufferSize:COORD, dwBufferCoord:COORD, lpWriteRegion:PTR SMALL_RECT ; (kernel32) draw a block of CHAR_INFO cells
@@ -289,6 +293,15 @@ RGB_GOLD       = 004AC9FFh                  ; slot 14 keys / door B      #FFC94A
 PAL_KEEP_TEXT  = 7                          ; slot 7 (light gray text) keeps its colour
 PAL_KEEP_WHITE = 15                         ; slot 15 (white) keeps its colour
 PAL_SLOTS      = 16                         ; the console has 16 colour slots
+PAL_TRIES      = 2                          ; conhost: try to set the palette twice
+PAL_MODE_NONE  = 0                          ; palette not changed (standard colours)
+PAL_MODE_CONHOST = 1                        ; set with SetConsoleScreenBufferInfoEx
+PAL_MODE_VT    = 2                          ; set with VT sequences (Windows Terminal)
+VT_PROCESSING  = 0004h                      ; ENABLE_VIRTUAL_TERMINAL_PROCESSING
+VT_IDX_POS     = 4                          ; vtTemplate: position of the colour number
+VT_RED_POS     = 11                         ; vtTemplate: position of RR
+VT_GREEN_POS   = 14                         ; vtTemplate: position of GG
+VT_BLUE_POS    = 17                         ; vtTemplate: position of BB
 FORCE_FALLBACK = 0                          ; debug: 1 = pretend the palette call failed
 DEBUG_LOG      = 1                          ; debug: 1 = write wolf_debug.log next to the exe
 
@@ -302,6 +315,18 @@ themeColors DWORD RGB_SKY, RGB_BRICK_0, RGB_BRICK_1, RGB_BRICK_2   ; slots 0-3
 origInfo    CSBI_EX <>                      ; the console settings found at start (restored at exit)
 themeInfo   CSBI_EX <>                      ; the same settings with the theme colours
 paletteOK   DWORD 0                         ; 1 if the theme palette was installed
+paletteMode DWORD PAL_MODE_NONE             ; how the theme was installed (for RestorePalette)
+origOutMode DWORD 0                         ; console output mode before VT was switched on
+classText   BYTE 64 DUP(0)                  ; console window class name
+pseudoName  BYTE "PseudoConsoleWindow", 0   ; class name used by Windows Terminal
+ansiOrder   BYTE 0, 4, 2, 6, 1, 5, 3, 7, 8, 12, 10, 14, 9, 13, 11, 15 ; console slot -> ANSI colour number
+hexDigits   BYTE "0123456789abcdef"         ; for PutHex2
+vtTemplate  BYTE 27, "]4;00;rgb:00/00/00", 27, 5Ch ; OSC 4: set one palette colour (5Ch = backslash)
+VT_LEN = ($ - vtTemplate)                   ; 21 bytes
+vtBuf       BYTE VT_LEN DUP(0)              ; one filled-in sequence
+vtReset     BYTE 27, "]104", 27, 5Ch       ; OSC 104: reset all palette colours
+VT_RESET_LEN = ($ - vtReset)                ; 7 bytes
+vtWritten   DWORD 0                         ; WriteConsole stores the count here
 tinyRect    SMALL_RECT <0, 0, 0, 0>          ; 1x1 window, so the buffer can shrink
 gameRect    SMALL_RECT <0, 0, SCREEN_W - 1, BUF_H - 1> ; the window we want (inclusive corners)
 gameSize    COORD <SCREEN_W, BUF_H>         ; the buffer size we want
@@ -337,6 +362,7 @@ lgBufSize   BYTE "SetConsoleScreenBufferSize", 0
 lgWinGame   BYTE "SetConsoleWindowInfo (game size)", 0
 lgAfter     BYTE "GetConsoleScreenBufferInfoEx (after resize)", 0
 lgPalOK     BYTE "paletteOK (1 = custom table, 0 = fallback table): ", 0
+lgMode      BYTE "paletteMode (0 none, 1 conhost, 2 VT / Windows Terminal): ", 0
 lgWinOK     BYTE "windowOK: ", 0
 
 ; ---------- role -> console colour tables (index = role C_SKY .. C_WHITE) ----------
@@ -526,8 +552,8 @@ main PROC
 IF DEBUG_LOG
     INVOKE OpenLog                          ; debug: start wolf_debug.log
 ENDIF
-    INVOKE LoadPalette                      ; blue/orange theme (keeps standard colours if it fails)
-    INVOKE SetupWindow                      ; window = SCREEN_W x BUF_H (after the palette call)
+    INVOKE SetupWindow                      ; FIRST: window and buffer = SCREEN_W x BUF_H
+    INVOKE LoadPalette                      ; THEN: blue/orange theme (standard colours if it fails)
 IF DEBUG_LOG
     INVOKE CloseLog                         ; debug: finish wolf_debug.log
 ENDIF
@@ -919,41 +945,85 @@ ENDIF
 
 ;-------------------------------------------------------------
 ; LoadPalette
-; Purpose:   Read the console settings (GetConsoleScreenBufferInfoEx)
-;            and keep them in origInfo. Then copy them to
-;            themeInfo, replace the palette colours with the
-;            blue/orange theme (slots 7 and 15 stay as they
-;            were) and apply it. If the console does not allow
-;            this (e.g. Windows Terminal), nothing changes and
-;            the game runs with the standard colours.
-;            Finally the matching role table (customRoles or
-;            fallbackRoles) is copied into roleColors.
-; Receives:  nothing (consoleHandle must be set by HideCursor)
-; Returns:   origInfo, themeInfo, paletteOK = 1 on success,
-;            roleColors filled
+; Purpose:   Install the blue/orange theme colours, whatever
+;            console the game runs in. Called AFTER SetupWindow.
+;            - Windows Terminal (pseudo console, e.g. F5 from
+;              Visual Studio): it ignores the console colour
+;              table, so the colours are set with VT escape
+;              sequences (SetPaletteVT).
+;            - Classic console (conhost): read the settings
+;              fresh, change only the colour table, apply it and
+;              read it back (TryConhostPalette); one retry.
+;            If nothing works, the standard colours are used
+;            (fallbackRoles). The Set call can show the cursor
+;            again, so it is hidden once more at the end.
+; Receives:  nothing (consoleHandle must be set)
+; Returns:   paletteOK, paletteMode, roleColors set
 ; Registers: none (EAX, ECX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
 LoadPalette PROC USES eax ecx esi edi
 IF FORCE_FALLBACK                           ; debug build: skip the palette completely
     jmp  PaletteDone                        ; paletteOK stays 0 -> standard colours
 ENDIF
+    call IsPseudoConsole                    ; EAX = 1 in Windows Terminal
+    cmp  eax, 0                             ; classic console?
+    je   ConhostPalette                     ; yes
+    call SetPaletteVT                       ; Windows Terminal: VT colour sequences
+    cmp  eax, 0                             ; did it work?
+    je   PaletteDone                        ; no: standard colours
+    mov  paletteMode, PAL_MODE_VT           ; remember how to undo it
+    mov  paletteOK, 1                       ; custom colours are active
+    jmp  PaletteDone                        ; finished
+ConhostPalette:
     mov  origInfo.cbSize, SIZEOF CSBI_EX    ; Windows checks the structure size
-    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR origInfo ; read the settings
-IF DEBUG_LOG
-    push eax                                ; keep the result
-    mov  ecx, eax                           ; ECX = result
-    INVOKE GetLastError                     ; EAX = error code
-    INVOKE LogCall, ADDR lgGet, ecx, eax    ; log result and error
-    INVOKE LogInfo, ADDR origInfo           ; log size, window and colours
-    pop  eax                                ; result again
-ENDIF
+    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR origInfo ; original colours (restored at exit)
     cmp  eax, 0                             ; did it fail?
-    je   PaletteDone                        ; yes: keep the standard colours
+    je   PaletteDone                        ; yes: standard colours
+    mov  ecx, PAL_TRIES                     ; two tries
+TryLoop:
+    call TryConhostPalette                  ; EAX = 1 if the colours are really set
+    cmp  eax, 0                             ; worked?
+    jne  ConhostOK                          ; yes
+    loop TryLoop                            ; no: try once more
+    jmp  PaletteDone                        ; still not: standard colours
+ConhostOK:
+    mov  paletteMode, PAL_MODE_CONHOST      ; remember how to undo it
+    mov  paletteOK, 1                       ; custom colours are active
+PaletteDone:
+    INVOKE SetConsoleCursorInfo, consoleHandle, ADDR cursorInfo ; hide the cursor again
+    mov  esi, OFFSET customRoles            ; assume the theme palette is active
+    cmp  paletteOK, 0                       ; did it work?
+    jne  HaveRoles                          ; yes: role = palette slot
+    mov  esi, OFFSET fallbackRoles          ; no: standard colours with the same look
+HaveRoles:
     cld                                     ; copy forwards
-    mov  esi, OFFSET origInfo               ; ESI = the original settings
-    mov  edi, OFFSET themeInfo              ; EDI = the copy we change
-    mov  ecx, SIZEOF CSBI_EX                ; ECX = 96 bytes
-    rep  movsb                              ; copy them
+    mov  edi, OFFSET roleColors             ; EDI = the active table
+    mov  ecx, PAL_SLOTS                     ; 16 roles
+    rep  movsb                              ; copy the chosen table
+IF DEBUG_LOG
+    INVOKE LogNum, ADDR lgMode, paletteMode ; 0 none, 1 conhost, 2 Windows Terminal
+    INVOKE LogNum, ADDR lgPalOK, paletteOK  ; which colour table is used
+ENDIF
+    ret                                     ; back to caller
+LoadPalette ENDP
+
+;-------------------------------------------------------------
+; TryConhostPalette
+; Purpose:   One attempt to set the theme in the classic
+;            console: read the current settings (after the
+;            resize, so dwSize is the game size), replace only
+;            the colour table (slots 7 and 15 stay), apply it
+;            with SetPalette (window off-by-one fix), read it
+;            back and compare all 16 colours with REPE CMPSD.
+; Receives:  nothing
+; Returns:   EAX = 1 if the read-back colours match, else 0
+; Registers: EAX (ECX, ESI, EDI saved by USES)
+;-------------------------------------------------------------
+TryConhostPalette PROC USES ecx esi edi
+    mov  themeInfo.cbSize, SIZEOF CSBI_EX   ; Windows checks the structure size
+    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR themeInfo ; fresh settings
+    cmp  eax, 0                             ; did it fail?
+    je   TryFail                            ; yes
     mov  ecx, 0                             ; ECX = slot number 0..15
 SlotLoop:
     cmp  ecx, PAL_KEEP_TEXT                 ; slot 7 (normal text)?
@@ -966,38 +1036,119 @@ NextSlot:
     inc  ecx                                ; next slot
     cmp  ecx, PAL_SLOTS                     ; all 16 done?
     jb   SlotLoop                           ; no: continue
-    INVOKE SetPalette, ADDR themeInfo       ; apply the theme, EAX = 1 if it worked
-    mov  paletteOK, eax                     ; remember (restore only if we changed it)
-IF DEBUG_LOG
+    INVOKE SetPalette, ADDR themeInfo       ; apply it (Right/Bottom +1 fix inside)
+    cmp  eax, 0                             ; did it fail?
+    je   TryFail                            ; yes
     mov  checkInfo.cbSize, SIZEOF CSBI_EX   ; read the settings back
     INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR checkInfo ; what did Windows keep?
-    mov  ecx, eax                           ; ECX = result
-    INVOKE GetLastError                     ; EAX = error code
-    INVOKE LogCall, ADDR lgReadBack, ecx, eax ; log result and error
-    INVOKE LogInfo, ADDR checkInfo          ; log what is really set now
-    mov  ecx, 0                             ; assume no match
-    mov  eax, checkInfo.ColorTable[4]       ; slot 1 read back
-    cmp  eax, themeColors[4]                ; same as the theme?
-    jne  LogMatch                           ; no
-    mov  ecx, 1                             ; yes
-LogMatch:
-    INVOKE LogNum, ADDR lgMatch, ecx        ; log the comparison
-ENDIF
-PaletteDone:
-    mov  esi, OFFSET customRoles            ; assume the theme palette is active
-    cmp  paletteOK, 0                       ; did it work?
-    jne  HaveRoles                          ; yes: role = palette slot
-    mov  esi, OFFSET fallbackRoles          ; no: standard colours with the same look
-HaveRoles:
-    cld                                     ; copy forwards
-    mov  edi, OFFSET roleColors             ; EDI = the active table
-    mov  ecx, PAL_SLOTS                     ; 16 roles
-    rep  movsb                              ; copy the chosen table
-IF DEBUG_LOG
-    INVOKE LogNum, ADDR lgPalOK, paletteOK  ; which colour table is used
-ENDIF
+    cmp  eax, 0                             ; did it fail?
+    je   TryFail                            ; yes
+    cld                                     ; compare forwards
+    mov  esi, OFFSET themeInfo.ColorTable   ; ESI = colours we wanted
+    mov  edi, OFFSET checkInfo.ColorTable   ; EDI = colours Windows has now
+    mov  ecx, PAL_SLOTS                     ; 16 DWORDs
+    repe cmpsd                              ; compare while equal
+    jne  TryFail                            ; a colour differs: not applied
+    mov  eax, 1                             ; all 16 colours match
     ret                                     ; back to caller
-LoadPalette ENDP
+TryFail:
+    mov  eax, 0                             ; did not work
+    ret                                     ; back to caller
+TryConhostPalette ENDP
+
+;-------------------------------------------------------------
+; IsPseudoConsole
+; Purpose:   Find out if the game runs in a pseudo console
+;            (Windows Terminal, also used for F5 in Visual
+;            Studio): its console window class is
+;            "PseudoConsoleWindow" instead of "ConsoleWindowClass".
+; Receives:  nothing
+; Returns:   EAX = 1 for a pseudo console, 0 otherwise
+; Registers: EAX (ECX, EDX saved by USES)
+;-------------------------------------------------------------
+IsPseudoConsole PROC USES ecx edx
+    mov  classText, 0                       ; empty name if the calls fail
+    INVOKE GetConsoleWindow                 ; EAX = console window handle
+    INVOKE GetClassNameA, eax, ADDR classText, 63 ; its class name
+    INVOKE Str_compare, ADDR classText, ADDR pseudoName ; compare (sets the flags like CMP)
+    mov  eax, 0                             ; (MOV keeps the flags) assume classic console
+    jne  PseudoDone                         ; different name: classic console
+    mov  eax, 1                             ; pseudo console
+PseudoDone:
+    ret                                     ; back to caller
+IsPseudoConsole ENDP
+
+;-------------------------------------------------------------
+; SetPaletteVT
+; Purpose:   Set the theme colours in Windows Terminal with VT
+;            sequences: ESC ] 4 ; index ; rgb:RR/GG/BB ESC backslash
+;            (OSC 4). Console colour slots are numbered
+;            blue=1, red=4; ANSI numbers are red=1, blue=4, so
+;            ansiOrder translates the slot number.
+; Receives:  nothing (uses themeColors)
+; Returns:   EAX = 1 if VT mode could be switched on, else 0
+; Registers: EAX (EBX, ECX, EDX, ESI, EDI saved by USES)
+;-------------------------------------------------------------
+SetPaletteVT PROC USES ebx ecx edx esi edi
+    INVOKE GetConsoleMode, consoleHandle, ADDR origOutMode ; current output mode
+    mov  eax, origOutMode                   ; EAX = mode
+    or   eax, VT_PROCESSING                 ; + understand VT sequences
+    INVOKE SetConsoleMode, consoleHandle, eax ; switch it on
+    cmp  eax, 0                             ; failed?
+    je   VTFail                             ; yes: standard colours
+    mov  ebx, 0                             ; EBX = slot (Windows calls keep EBX)
+VTSlot:
+    cmp  ebx, PAL_KEEP_TEXT                 ; slot 7 (normal text)?
+    je   VTNext                             ; yes: keep it
+    cmp  ebx, PAL_KEEP_WHITE                ; slot 15 (white)?
+    je   VTNext                             ; yes: keep it
+    cld                                     ; copy forwards
+    mov  esi, OFFSET vtTemplate             ; ESI = ESC ]4;00;rgb:00/00/00 ESC backslash
+    mov  edi, OFFSET vtBuf                  ; EDI = buffer
+    mov  ecx, VT_LEN                        ; ECX = length
+    rep  movsb                              ; copy the template
+    movzx eax, ansiOrder[ebx]               ; EAX = ANSI colour number for this slot
+    INVOKE PutNumber, ADDR vtBuf + VT_IDX_POS, eax, 2 ; write it (2 digits)
+    mov  edx, themeColors[ebx*4]            ; EDX = 00BBGGRR
+    movzx eax, dl                           ; EAX = red
+    INVOKE PutHex2, ADDR vtBuf + VT_RED_POS, eax   ; write RR
+    movzx eax, dh                           ; EAX = green
+    INVOKE PutHex2, ADDR vtBuf + VT_GREEN_POS, eax ; write GG
+    shr  edx, 16                            ; DL = blue
+    movzx eax, dl                           ; EAX = blue
+    INVOKE PutHex2, ADDR vtBuf + VT_BLUE_POS, eax  ; write BB
+    INVOKE WriteConsoleA, consoleHandle, ADDR vtBuf, VT_LEN, ADDR vtWritten, 0 ; send the sequence
+VTNext:
+    inc  ebx                                ; next slot
+    cmp  ebx, PAL_SLOTS                     ; all 16 done?
+    jb   VTSlot                             ; no: continue
+    mov  eax, 1                             ; colours sent
+    ret                                     ; back to caller
+VTFail:
+    mov  eax, 0                             ; VT not available
+    ret                                     ; back to caller
+SetPaletteVT ENDP
+
+;-------------------------------------------------------------
+; PutHex2
+; Purpose:   Write a byte as two lowercase hex digits.
+; Receives:  dest = address, value = 0..255
+; Returns:   nothing (2 bytes at dest)
+; Registers: none (EAX, EDI saved by USES)
+;-------------------------------------------------------------
+PutHex2 PROC USES eax edi, dest:PTR BYTE, value:DWORD
+    mov  edi, dest                          ; EDI = where to write
+    mov  eax, value                         ; EAX = byte
+    shr  eax, 4                             ; high nibble
+    and  eax, 0Fh                           ; 0..15
+    mov  al, hexDigits[eax]                 ; its digit
+    mov  [edi], al                          ; store it
+    mov  eax, value                         ; EAX = byte again
+    and  eax, 0Fh                           ; low nibble
+    mov  al, hexDigits[eax]                 ; its digit
+    mov  [edi + 1], al                      ; store it
+    ret                                     ; back to caller
+PutHex2 ENDP
 
 ;-------------------------------------------------------------
 ; SetRoleColor
@@ -1020,15 +1171,22 @@ SetRoleColor ENDP
 ; RestorePalette
 ; Purpose:   Put the console colours back the way they were
 ;            when the program started (only if LoadPalette
-;            changed them).
-; Receives:  nothing (uses paletteOK, origInfo)
+;            changed them): conhost -> SetPalette(origInfo),
+;            Windows Terminal -> VT reset sequence (OSC 104).
+; Receives:  nothing (uses paletteMode, origInfo, origOutMode)
 ; Returns:   nothing
-; Registers: none (EAX saved by USES)
+; Registers: none (EAX, ECX, EDX saved by USES)
 ;-------------------------------------------------------------
-RestorePalette PROC USES eax
-    cmp  paletteOK, 0                       ; did we change the palette?
-    je   RestoreDone                        ; no: nothing to undo
+RestorePalette PROC USES eax ecx edx
+    cmp  paletteMode, PAL_MODE_CONHOST      ; classic console palette changed?
+    jne  RestoreVT                          ; no
     INVOKE SetPalette, ADDR origInfo        ; yes: original colours back
+    jmp  RestoreDone                        ; finished
+RestoreVT:
+    cmp  paletteMode, PAL_MODE_VT           ; Windows Terminal colours changed?
+    jne  RestoreDone                        ; no: nothing to undo
+    INVOKE WriteConsoleA, consoleHandle, ADDR vtReset, VT_RESET_LEN, ADDR vtWritten, 0 ; ESC ]104 ESC \ = reset colours
+    INVOKE SetConsoleMode, consoleHandle, origOutMode ; old output mode back
 RestoreDone:
     ret                                     ; back to caller
 RestorePalette ENDP
