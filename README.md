@@ -15,9 +15,11 @@ A first-person 3D raycasting maze game written in 32-bit x86 assembly (MASM + Ir
 - **Title, win and lose screens** – block-letter logo and banners, play again (Y/N).
 - **Integer maths only** – Q8 fixed point (value × 256), 360-entry sine table, no FPU or SSE.
 
-| Corridor (3D view + minimap) | Exit door (blinking) |
+| Corridor (3D view + minimap) | Key found |
 |---|---|
-| ![Corridor](screenshots/corridor.png) | ![Door](screenshots/door.png) |
+| ![Corridor](screenshots/corridor.png) | ![Key](screenshots/key.png) |
+| **Door locked** | **Escaped!** |
+| ![Door locked](screenshots/door_locked.png) | ![Win](screenshots/win.png) |
 | **Time up** | |
 | ![Lose](screenshots/lose.png) | |
 
