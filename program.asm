@@ -94,15 +94,15 @@ PrintTime   PROTO                           ; EAX = seconds, prints mm:ss
 WinScreen   PROTO                           ; shows the "you escaped" screen
 LoseScreen  PROTO                           ; shows the "time's up" screen
 AskPlayAgain PROTO                          ; EAX = 1 for Y, 0 for N or Q
-ClearBuffer PROTO                           ; fills frameBuffer with spaces
+ClearBuffer PROTO                           ; empties the text overlay (frameBuffer, attrBuffer)
 HideCursor  PROTO                           ; hides the blinking console cursor
 SetupWindow PROTO                           ; console buffer and window = exactly the game size
 LoadPalette PROTO                           ; saves the console palette, installs the blue/orange theme
 RestorePalette PROTO                        ; puts the saved palette back
 SetPalette  PROTO, infoPtr:PTR CSBI_EX      ; EAX = 1 if the palette in *infoPtr was applied
 SetRoleColor PROTO                          ; EAX = colour role in, sets the console text colour
-ApplyRoles  PROTO                           ; turns the roles in attrBuffer into real colours
-DrawBuffer  PROTO                           ; copies frameBuffer to the console
+ComposeFrame PROTO                          ; pixels + text -> CHAR_INFO buffer -> one WriteConsoleOutput
+WriteConsoleOutputA PROTO, hConsole:DWORD, lpBuffer:PTR DWORD, dwBufferSize:COORD, dwBufferCoord:COORD, lpWriteRegion:PTR SMALL_RECT ; (kernel32) draw a block of CHAR_INFO cells
 GetMoveDelta PROTO                          ; returns EAX = dx, EDX = dy for one step forward
 IsWall      PROTO, testX:SDWORD, testY:SDWORD     ; EAX = CELL_FREE / CELL_WALL / CELL_EXIT
 ProbePoint  PROTO, newPos:SDWORD, delta:SDWORD    ; EAX = newPos pushed MARGIN further in move direction
@@ -124,13 +124,13 @@ WaitKeysReleased PROTO                      ; waits until keys are let go, sets 
 SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
 CastRay     PROTO, rayDirX:SDWORD, rayDirY:SDWORD ; EAX = distance (Q8), EDX = hitSide, ECX = hit type
 GetWallLevel PROTO, distance:DWORD, side:DWORD    ; EAX = wall shade level 0..3 for a distance
-GetFloorColor PROTO                         ; ECX = row in, EAX = floor colour for that row
+GetFloorPixel PROTO                         ; ECX = pixel row in, EAX = floor colour role
 GetWallHeight PROTO                         ; EAX = distance in, EAX = real wall height in rows
-DrawColumn  PROTO, column:DWORD             ; draws one screen column from the column arrays
-GetColumnColor PROTO, column:DWORD          ; EAX = colour of a column's wall slice
+DrawPixelColumn PROTO, column:DWORD         ; draws one pixel column into pixBuf
+GetColumnKind PROTO, column:DWORD           ; EAX = KIND_EDGE / KIND_DOOR / KIND_KEY / KIND_BRICK
+GetWallPixel PROTO, kind:DWORD, level:DWORD, wallX:DWORD, texRow:DWORD, lineH:DWORD ; EAX = colour of one wall pixel
 CastAllRays PROTO                           ; casts the 80 rays into the column arrays
 IsEdgeColumn PROTO, column:DWORD            ; EAX = 1 if the column is an edge between walls
-IsMortar    PROTO, texRow:DWORD, wallH:DWORD, wallX:DWORD ; EAX = 1 on a brick mortar line
 IsStar      PROTO, rayAngle:DWORD           ; ECX = row in, EAX = 1 if a star is at this ceiling cell
 RenderView  PROTO                           ; casts 80 rays and draws the 3D view
 TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
@@ -150,11 +150,18 @@ MARGIN     = 64                             ; keep 64/256 = 1/4 cell away from w
 BIG_DIST   = 1000000                        ; "infinite" distance, used when a ray never crosses an axis
 KEY_WAIT_TRIES = 200                        ; max 200 x 10 ms = 2 s waiting for keys to be released
 CODE_PAGE_437  = 437                        ; old IBM PC character set (has the block characters)
-FLOOR_BAND     = 3                          ; each floor shade covers 3 rows
+PIX_W          = VIEW_COLS                  ; pixel columns of the 3D view (one ray each)
+PIX_H          = VIEW_ROWS_CELLS * 2        ; pixel rows: two pixels per console cell
+HORIZON        = PIX_H / 2                  ; pixel row of the horizon
+HALF_BLOCK     = 223                        ; code page 437 upper half block
+KIND_EDGE      = 0                          ; wall slice kinds (GetColumnKind)
+KIND_DOOR      = 1                          ; exit door
+KIND_KEY       = 2                          ; key
+KIND_BRICK     = 3                          ; brick wall '#'
 WALL_CHAR      = 219                        ; code page 437 full block: every wall cell
 STAR_CHAR      = '.'                        ; a star in the night sky
 STAR_ATTR      = C_FLOOR_NEAR               ; stars: slot 8 (C_FLOOR_NEAR), dim
-STAR_MOD       = 37                         ; star if (rayAngle*7 + row*13) mod 37 = 0
+STAR_MOD       = 61                         ; star if (rayAngle*7 + row*13) mod 61 = 0 (few stars)
 EDGE_LOW       = 20                         ; wallX below this = near a cell corner
 PLANE_LEN      = 148                        ; tan(30 degrees) * 256: half-width of the camera plane
 EDGE_HIGH      = 236                        ; wallX above this = near a cell corner
@@ -390,8 +397,11 @@ wallColors  BYTE C_WALL_0, C_WALL_1, C_WALL_2, C_WALL_3, C_OUTLINE ; wall shades
 floorColors BYTE C_FLOOR_NEAR, C_FLOOR_MID, C_FLOOR_FAR, C_FLOOR_FAR ; floor: nearest rows first
 
 ; ---------- screen drawing data ----------
-frameBuffer   BYTE SCREEN_W * BUF_H DUP(' ')      ; 80x25 = 2000 chars, cell (row,col) at row*80 + col
-attrBuffer    WORD SCREEN_W * BUF_H DUP(DEFAULT_ATTR) ; colour of each cell, same layout (2 bytes each)
+frameBuffer   BYTE SCREEN_W * BUF_H DUP(0)  ; text overlay (HUD, minimap): cell (row,col) at row*SCREEN_W + col, 0 = no text
+attrBuffer    WORD SCREEN_W * BUF_H DUP(DEFAULT_ATTR) ; colour role of each text cell, same layout (2 bytes each)
+pixBuf        BYTE PIX_W * PIX_H DUP(0)     ; 3D view pixels, one colour role each: pixel (y,x) at y*PIX_W + x
+charBuf       DWORD SCREEN_W * BUF_H DUP(0) ; CHAR_INFO cells for WriteConsoleOutput (char low word, colour high word)
+writeRect     SMALL_RECT <>                 ; area WriteConsoleOutput draws (set every frame)
 consoleHandle DWORD ?                       ; handle of the console output (set by HideCursor)
 cursorInfo    CONSOLE_CURSOR_INFO <100, 0>  ; cursor size 100%, bVisible = 0 (hidden)
 drawPos       COORD <0, 0>                  ; screen position (0,0) where drawing starts
@@ -615,21 +625,21 @@ PrintArt ENDP
 
 ;-------------------------------------------------------------
 ; ClearBuffer
-; Purpose:   Fill the whole frameBuffer (view + HUD row) with
-;            spaces and the whole attrBuffer with the normal
-;            colour (light gray on black).
+; Purpose:   Empty the text overlay: frameBuffer = 0 (no text,
+;            the pixels show through) and attrBuffer = the
+;            normal colour.
 ; Receives:  nothing
 ; Returns:   nothing
 ; Registers: none (EAX, ECX, EDI saved by USES)
 ;-------------------------------------------------------------
 ClearBuffer PROC USES eax ecx edi
     cld                                     ; direction flag = 0, so EDI moves forward
-    mov  al, ' '                            ; AL = the byte to store (a space)
-    mov  ecx, SCREEN_W * BUF_H              ; ECX = how many bytes (2000)
+    mov  al, 0                              ; AL = the byte to store (0 = no text)
+    mov  ecx, SCREEN_W * BUF_H              ; ECX = how many bytes (one per cell)
     mov  edi, OFFSET frameBuffer            ; EDI = start of the buffer
     rep  stosb                              ; store AL at [EDI], EDI++, repeat ECX times
     mov  ax, DEFAULT_ATTR                   ; AX = the word to store (normal colour)
-    mov  ecx, SCREEN_W * BUF_H              ; ECX = how many words (2000)
+    mov  ecx, SCREEN_W * BUF_H              ; ECX = how many words (one per cell)
     mov  edi, OFFSET attrBuffer             ; EDI = start of the colour buffer
     rep  stosw                              ; store AX at [EDI], EDI += 2, repeat ECX times
     ret                                     ; back to caller
@@ -760,29 +770,6 @@ SetRoleColor PROC USES eax ebx
 SetRoleColor ENDP
 
 ;-------------------------------------------------------------
-; ApplyRoles
-; Purpose:   Turn every colour in attrBuffer from a ROLE into the
-;            real console colour (roleColors), just before the
-;            frame is drawn. Background stays 0 (the sky).
-; Receives:  nothing (uses attrBuffer, roleColors)
-; Returns:   attrBuffer changed
-; Registers: none (EAX, EBX, ECX, ESI saved by USES)
-;-------------------------------------------------------------
-ApplyRoles PROC USES eax ebx ecx esi
-    mov  ebx, OFFSET roleColors             ; EBX = table for XLAT
-    mov  esi, OFFSET attrBuffer             ; ESI = first colour
-    mov  ecx, SCREEN_W * BUF_H              ; ECX = 2000 cells
-RoleLoop:
-    mov  ax, [esi]                          ; AX = role of this cell
-    and  al, 0Fh                            ; foreground role only
-    xlat                                    ; AL = [EBX + AL] = real colour
-    mov  [esi], ax                          ; store it back
-    add  esi, 2                             ; next cell (2 bytes each)
-    loop RoleLoop                           ; ECX--, repeat for all cells
-    ret                                     ; back to caller
-ApplyRoles ENDP
-
-;-------------------------------------------------------------
 ; RestorePalette
 ; Purpose:   Put the console colours back the way they were
 ;            when the program started (only if LoadPalette
@@ -826,43 +813,79 @@ SetDone:
 SetPalette ENDP
 
 ;-------------------------------------------------------------
-; DrawBuffer
-; Purpose:   Copy frameBuffer and attrBuffer to the console one
-;            row at a time: for each of the 25 rows (24 view rows
-;            + HUD row) write 80 chars, then their 80 colours,
-;            to (0,row).
-;            Nothing is cleared, only overwritten, so no flicker,
-;            and each row starts at column 0 at any console width.
-; Receives:  nothing (uses frameBuffer, attrBuffer, consoleHandle)
-; Returns:   nothing
+; ComposeFrame
+; Purpose:   Build the whole console picture in charBuf
+;            (CHAR_INFO: character in the low word, colour in
+;            the high word) and draw it with ONE
+;            WriteConsoleOutput call.
+;            - text cells (HUD row, minimap: frameBuffer <> 0):
+;              that character, colour from attrBuffer
+;            - all other view cells: half block 223, the upper
+;              pixel is the foreground colour, the lower pixel
+;              the background colour:
+;              attr = colour(top) OR colour(bottom) SHL 4
+;            Roles become real colours through roleColors (XLAT).
+; Receives:  nothing (uses pixBuf, frameBuffer, attrBuffer)
+; Returns:   nothing (console changed)
 ; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-DrawBuffer PROC USES eax ebx ecx edx esi edi
-    mov  esi, OFFSET frameBuffer            ; ESI = start of row 0 of the characters
-    mov  edi, OFFSET attrBuffer             ; EDI = start of row 0 of the colours
-    mov  ebx, 0                             ; EBX = row number, start at 0
-RowLoop:
-    mov  drawPos.X, 0                       ; screen column 0
-    mov  drawPos.Y, bx                      ; screen row = current row number
-    INVOKE WriteConsoleOutputCharacter, ; write characters straight into the console
-           consoleHandle,               ; where to write
-           esi,                         ; what to write: frameBuffer + row*80
-           SCREEN_W,                    ; how many characters (80, one row)
-           drawPos,                     ; start at (0, row)
-           ADDR charsWritten            ; Windows puts the count here
-    INVOKE WriteConsoleOutputAttribute, ; write the colours of the same 80 cells
-           consoleHandle,               ; where to write
-           edi,                         ; what to write: attrBuffer + row*80 words
-           SCREEN_W,                    ; how many colours (80, one row)
-           drawPos,                     ; start at (0, row)
-           ADDR charsWritten            ; Windows puts the count here
-    add  edi, SCREEN_W * 2                  ; next row of colours (each colour is 2 bytes)
-    add  esi, SCREEN_W                      ; move ESI to the start of the next row
-    inc  ebx                                ; next row number
-    cmp  ebx, BUF_H                         ; done all 25 rows?
-    jb   RowLoop                            ; no: write the next row
+ComposeFrame PROC USES eax ebx ecx edx esi edi
+    LOCAL row:DWORD                         ; console row being built
+    mov  ebx, OFFSET roleColors             ; EBX = role table for XLAT
+    mov  edi, OFFSET charBuf                ; EDI = next CHAR_INFO cell
+    mov  esi, 0                             ; ESI = cell number (row*SCREEN_W + x)
+    mov  row, 0                             ; start at row 0
+ComposeRow:
+    mov  ecx, 0                             ; ECX = x
+ComposeCell:
+    movzx eax, frameBuffer[esi]             ; AL = text character (0 = none)
+    cmp  eax, 0                             ; text in this cell?
+    jne  TextCell                           ; yes: draw the text
+    cmp  row, SCREEN_H                      ; HUD row (no pixels there)?
+    jae  BlankCell                          ; yes: a space
+    ; ----- half block from two pixels -----
+    mov  edx, row                           ; EDX = console row
+    shl  edx, 1                             ; pixel row of the upper pixel = 2*row
+    imul edx, PIX_W                         ; * pixels per row
+    add  edx, ecx                           ; + x = index of the upper pixel
+    mov  al, pixBuf[edx + PIX_W]            ; AL = lower pixel role
+    xlat                                    ; AL = real colour of the lower pixel
+    shl  eax, 4                             ; lower pixel -> background nibble
+    push eax                                ; keep it
+    mov  al, pixBuf[edx]                    ; AL = upper pixel role
+    xlat                                    ; AL = real colour of the upper pixel
+    and  eax, 0Fh                           ; foreground nibble only
+    pop  edx                                ; EDX = background part
+    or   eax, edx                           ; attribute = fg OR bg
+    shl  eax, 16                            ; attribute goes in the high word
+    mov  ax, HALF_BLOCK                     ; character 223 in the low word
+    jmp  StoreCell                          ; store the cell
+BlankCell:
+    mov  eax, ' '                           ; empty HUD cell
+TextCell:
+    mov  edx, eax                           ; EDX = character
+    mov  ax, attrBuffer[esi*2]              ; AX = colour role of this cell
+    and  eax, 0Fh                           ; foreground role (background is role 0)
+    xlat                                    ; AL = real colour
+    shl  eax, 16                            ; attribute in the high word
+    mov  ax, dx                             ; character in the low word
+StoreCell:
+    mov  [edi], eax                         ; store the CHAR_INFO (4 bytes)
+    add  edi, 4                             ; next CHAR_INFO
+    inc  esi                                ; next cell number
+    inc  ecx                                ; next x
+    cmp  ecx, SCREEN_W                      ; row finished?
+    jb   ComposeCell                        ; no: next cell
+    inc  row                                ; next row
+    cmp  row, BUF_H                         ; all rows (view + HUD)?
+    jb   ComposeRow                         ; no: next row
+    mov  writeRect.Left, 0                  ; Windows changes writeRect, so set it every frame
+    mov  writeRect.Top, 0                   ; top-left corner
+    mov  writeRect.Right, SCREEN_W - 1      ; bottom-right corner (inclusive)
+    mov  writeRect.Bottom, BUF_H - 1        ; last row
+    INVOKE WriteConsoleOutputA, consoleHandle, ADDR charBuf, gameSize, drawPos, ADDR writeRect ; one call draws everything
     ret                                     ; back to caller
-DrawBuffer ENDP
+ComposeFrame ENDP
 
 ;-------------------------------------------------------------
 ; GetMoveDelta
@@ -1708,251 +1731,233 @@ HaveLevel:
 GetWallLevel ENDP
 
 ;-------------------------------------------------------------
-; GetFloorColor
-; Purpose:   Pick the floor colour for a screen row. Rows near
-;            the bottom are close to the player and are bright;
-;            higher rows are further away and darker.
-;            level = (rows from bottom) / 3, max 3
-;            slot 8 (bottom 3 rows), slot 6, slot 5, slot 5
-; Receives:  ECX = screen row (0..23)
-; Returns:   EAX = floor colour attribute (in AL)
+; GetFloorPixel
+; Purpose:   Colour of one floor pixel. The floor fades from
+;            the near colour (bottom of the view) to the far
+;            colour (horizon) in four bands.
+; Receives:  ECX = pixel row (HORIZON..PIX_H-1)
+; Returns:   EAX = colour role
 ; Registers: EAX (EDX saved by USES)
 ;-------------------------------------------------------------
-GetFloorColor PROC USES edx
-    mov  eax, SCREEN_H - 1                  ; EAX = 23 (bottom row)
-    sub  eax, ecx                           ; EAX = rows from the bottom (0 = bottom)
+GetFloorPixel PROC USES edx
+    mov  eax, PIX_H - 1                     ; EAX = bottom pixel row
+    sub  eax, ecx                           ; EAX = rows above the bottom (0 = nearest)
+    shl  eax, 2                             ; * 4 bands
     mov  edx, 0                             ; clear EDX before DIV
-    push ecx                                ; keep the row number safe
-    mov  ecx, FLOOR_BAND                    ; divide by 3
-    div  ecx                                ; EAX = level
-    pop  ecx                                ; ECX = row number again
-    cmp  eax, 3                             ; past the last level?
-    jbe  FloorLevelOK                       ; no
-    mov  eax, 3                             ; yes: use the last level
-FloorLevelOK:
-    movzx eax, floorColors[eax]             ; EAX = floor colour
+    push ecx                                ; keep the row
+    mov  ecx, HORIZON                       ; divide by the floor height (30 rows)
+    div  ecx                                ; EAX = band 0 (near) .. 3 (far)
+    pop  ecx                                ; ECX = row again
+    cmp  eax, 3                             ; past the last band?
+    jbe  FloorBandOK                        ; no
+    mov  eax, 3                             ; yes: farthest band
+FloorBandOK:
+    movzx eax, floorColors[eax]             ; EAX = floor colour for this band
     ret                                     ; back to caller
-GetFloorColor ENDP
+GetFloorPixel ENDP
 
 ;-------------------------------------------------------------
 ; GetWallHeight
-; Purpose:   Turn a distance into the real wall height in rows:
-;            height = (SCREEN_H * 256) / distance
-;            (1 cell away = 256 -> 24 rows). Not limited to the
-;            screen: DrawColumn only draws the rows that fit.
+; Purpose:   Turn a distance into the wall height in PIXELS:
+;            height = (PIX_H * 256) / distance
+;            (1 cell away = 256 -> PIX_H pixels). Not limited to
+;            the view: DrawPixelColumn clips it.
 ; Receives:  EAX = distance (Q8, at least 1)
-; Returns:   EAX = wall height in rows (1..6144)
+; Returns:   EAX = wall height in pixels (at least 2)
 ; Registers: EAX (ECX, EDX saved by USES)
 ;-------------------------------------------------------------
 GetWallHeight PROC USES ecx edx
     mov  ecx, eax                           ; ECX = distance
-    mov  eax, SCREEN_H * 256                ; EAX = 6144
+    mov  eax, PIX_H * 256                   ; EAX = PIX_H in Q8
     mov  edx, 0                             ; clear EDX before DIV
-    div  ecx                                ; EAX = 6144 / distance
-    cmp  eax, 1                             ; at least one row?
+    div  ecx                                ; EAX = PIX_H * 256 / distance
+    cmp  eax, 2                             ; at least two pixels?
     jae  HeightOK                           ; yes
-    mov  eax, 1                             ; no: use 1 (no zero-height walls)
+    mov  eax, 2                             ; no: use 2 (no zero-height walls)
 HeightOK:
     ret                                     ; back to caller
 GetWallHeight ENDP
 
 ;-------------------------------------------------------------
-; DrawColumn
-; Purpose:   Fill one screen column, top to bottom:
-;            sky (with stars), wall slice, floor. Uses the
-;            results CastAllRays stored for this column.
-;            The wall is centred vertically; rows outside the
-;            screen are simply not drawn (wallTop can be < 0).
-;            Edge columns (IsEdgeColumn) draw the whole slice in
-;            the edge colour, so walls are clearly separated.
-;            Plain wall slices get a dark outline on their first
-;            and last row (crisp silhouette) and a brick texture
-;            (IsMortar) when they are at least 6 rows tall.
-; Receives:  column = screen x (0..79)
-; Returns:   nothing (frameBuffer, attrBuffer changed)
-; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
+; DrawPixelColumn
+; Purpose:   Draw one pixel column of the 3D view into pixBuf:
+;            sky (with stars), wall slice, floor. The slice is
+;            symmetric around the horizon:
+;              top    = HORIZON - height/2
+;              bottom = HORIZON + height/2
+;            so the floor edge never jitters between columns.
+;            Rows outside the view are simply not drawn.
+; Receives:  column = pixel column (0..PIX_W-1), uses the
+;            column arrays filled by CastAllRays
+; Returns:   nothing (pixBuf changed)
+; Registers: none (EAX, EBX, ECX, EDX, EDI saved by USES)
 ;-------------------------------------------------------------
-DrawColumn PROC USES eax ebx ecx edx esi edi, column:DWORD
-    LOCAL wallTop:SDWORD                    ; first wall row (may be negative)
-    LOCAL wallBottom:SDWORD                 ; first floor row (may be past the screen)
-    LOCAL wallColor:DWORD                   ; colour of the wall slice
-    LOCAL rayAng:DWORD                      ; ray angle of this column (for the stars)
-    LOCAL plainWall:DWORD                   ; 1 = normal wall slice (gets outline), 0 = edge/door/key
-    LOCAL wallH:DWORD                       ; real wall height in rows
-    LOCAL wallX:DWORD                       ; where along the wall this column is (0..255)
-    LOCAL mortarColor:DWORD                 ; one shade darker than the wall
+DrawPixelColumn PROC USES eax ebx ecx edx edi, column:DWORD
+    LOCAL wallTop:SDWORD                    ; first wall pixel row (may be negative)
+    LOCAL wallBottom:SDWORD                 ; first floor pixel row (may be past the view)
+    LOCAL lineH:DWORD                       ; wall height in pixels
+    LOCAL kind:DWORD                        ; KIND_EDGE / KIND_DOOR / KIND_KEY / KIND_BRICK / KIND_STONE
+    LOCAL level:DWORD                       ; distance shade 0 (near) .. 3 (far)
+    LOCAL wallX:DWORD                       ; where along the wall (0..255)
+    LOCAL rayAng:DWORD                      ; ray angle (for the stars)
 
-    ; ----- block 1: wall height and position -----
-    mov  ebx, column                        ; EBX = column number
-    movzx eax, colAngle[ebx*2]              ; ray angle (WORD array, scaled index)
-    mov  rayAng, eax                        ; keep it for IsStar
-    mov  eax, colDist[ebx*4]                ; EAX = distance (DWORD array)
-    call GetWallHeight                      ; EAX = real wall height in rows
-    mov  wallH, eax                         ; keep it for the brick texture
-    movzx edx, colWallX[ebx]                ; EDX = wallX of this column
-    mov  wallX, edx                         ; keep it for the brick joints
-    mov  edx, SCREEN_H                      ; EDX = 24
-    sub  edx, eax                           ; 24 - height (negative for tall walls)
-    sar  edx, 1                             ; half above the wall (signed divide by 2)
-    mov  wallTop, edx                       ; first wall row
-    add  edx, eax                           ; + height
+    ; ----- block 1: slice position -----
+    mov  ebx, column                        ; EBX = column
+    movzx eax, colAngle[ebx*2]              ; ray angle (WORD array)
+    mov  rayAng, eax                        ; keep it for the stars
+    movzx eax, colWallX[ebx]                ; position along the wall
+    mov  wallX, eax                         ; keep it for the texture
+    mov  eax, colDist[ebx*4]                ; EAX = perpendicular distance
+    call GetWallHeight                      ; EAX = height in pixels
+    mov  lineH, eax                         ; keep it
+    sar  eax, 1                             ; half the height
+    mov  edx, HORIZON                       ; EDX = horizon row
+    sub  edx, eax                           ; horizon - half
+    mov  wallTop, edx                       ; top of the slice
+    mov  edx, HORIZON                       ; EDX = horizon row
+    add  edx, eax                           ; horizon + half
     mov  wallBottom, edx                    ; first floor row
 
-    ; ----- block 2: wall colour, and is it a plain wall? -----
-    INVOKE GetColumnColor, ebx              ; EAX = colour for this column's slice
-    mov  wallColor, eax                     ; keep it
-    mov  plainWall, 0                       ; assume edge, door or key
-    cmp  colType[ebx], HIT_WALL             ; normal wall?
-    jne  KindDone                           ; no: door or key, keep it solid
-    INVOKE IsEdgeColumn, ebx                ; EAX = 1 for an edge column
-    cmp  eax, 0                             ; edge?
-    jne  KindDone                           ; yes: the edge line stays solid
-    mov  plainWall, 1                       ; plain wall: outline rows and bricks
+    ; ----- block 2: what kind of slice, and its shade -----
+    INVOKE GetColumnKind, ebx               ; EAX = kind of this column
+    mov  kind, eax                          ; keep it
     movzx eax, hitSideCol[ebx]              ; EAX = side (0 or 1)
     INVOKE GetWallLevel, colDist[ebx*4], eax ; EAX = shade level 0..3
-    movzx eax, wallColors[eax + 1]          ; one level darker (level 3 -> outline colour)
-    mov  mortarColor, eax                   ; mortar colour for the bricks
-KindDone:
+    mov  level, eax                         ; keep it
 
-    ; ----- block 3: draw the 24 rows -----
-    mov  edi, OFFSET frameBuffer            ; EDI = row 0 of the character buffer
-    add  edi, ebx                           ; move to this column
-    mov  esi, ebx                           ; ESI = column
-    shl  esi, 1                             ; column * 2 (each colour is a WORD)
-    add  esi, OFFSET attrBuffer             ; ESI = this column in row 0 of the colours
-    mov  ecx, 0                             ; ECX = row, start at 0
-ColumnRow:
-    cmp  ecx, wallTop                       ; above the wall? (signed: wallTop can be < 0)
-    jl   PutCeiling                         ; yes: sky
-    cmp  ecx, wallBottom                    ; still inside the wall? (signed)
-    jl   PutWall                            ; yes: wall
-    mov  BYTE PTR [edi], WALL_CHAR          ; otherwise floor: solid block
-    call GetFloorColor                      ; EAX = floor colour for row ECX
-    mov  [esi], ax                          ; store the colour
-    jmp  NextRow                            ; done with this row
-PutCeiling:
-    mov  BYTE PTR [edi], ' '                ; assume empty dark sky
-    mov  WORD PTR [esi], DEFAULT_ATTR       ; normal colour
+    ; ----- block 3: the pixels, top to bottom -----
+    mov  edi, OFFSET pixBuf                 ; EDI = pixel row 0
+    add  edi, ebx                           ; this column
+    mov  ecx, 0                             ; ECX = pixel row
+PixelRow:
+    cmp  ecx, wallTop                       ; above the wall? (signed: top can be < 0)
+    jl   PixSky                             ; yes: sky
+    cmp  ecx, wallBottom                    ; inside the wall? (signed)
+    jl   PixWall                            ; yes: wall
+    call GetFloorPixel                      ; floor: EAX = colour for row ECX
+    jmp  PixStore                           ; store it
+PixSky:
+    mov  eax, C_SKY                         ; dark sky
     INVOKE IsStar, rayAng                   ; EAX = 1 if a star belongs here
-    cmp  eax, 0                             ; no star?
-    je   NextRow                            ; then the row is done
-    mov  BYTE PTR [edi], STAR_CHAR          ; star character
-    mov  WORD PTR [esi], STAR_ATTR          ; dim star colour
-    jmp  NextRow                            ; done with this row
-PutWall:
-    mov  BYTE PTR [edi], WALL_CHAR          ; solid block
-    mov  eax, wallColor                     ; AX = slice colour
-    cmp  plainWall, 0                       ; edge, door or key?
-    je   StoreWall                          ; yes: one solid colour
-    cmp  ecx, wallTop                       ; first row of the slice?
-    je   PutOutline                         ; yes: outline
-    mov  edx, wallBottom                    ; EDX = first floor row
-    dec  edx                                ; EDX = last wall row
-    cmp  ecx, edx                           ; last row of the slice?
-    je   PutOutline                         ; yes: outline
-    cmp  wallH, BRICK_MIN_H                 ; slice too small for bricks?
-    jb   StoreWall                          ; yes: keep it clean
-    mov  edx, ecx                           ; EDX = row
+    cmp  eax, 0                             ; star?
+    mov  eax, C_SKY                         ; (MOV keeps the flags) sky colour
+    je   PixStore                           ; no star: sky
+    mov  eax, STAR_ATTR                     ; star colour
+    jmp  PixStore                           ; store it
+PixWall:
+    mov  edx, ecx                           ; EDX = pixel row
     sub  edx, wallTop                       ; EDX = row inside the slice (0 = top)
-    INVOKE IsMortar, edx, wallH, wallX      ; EAX = 1 on a mortar line
-    cmp  eax, 0                             ; mortar here?
-    mov  eax, wallColor                     ; (MOV does not change the flags) AX = wall colour
-    je   StoreWall                          ; no mortar: wall colour
-    mov  eax, mortarColor                   ; mortar: one shade darker
-    jmp  StoreWall                          ; store it
-PutOutline:
-    mov  eax, OUTLINE_ATTR                  ; dark outline against sky and floor
-StoreWall:
-    mov  [esi], ax                          ; store the colour
-NextRow:
-    add  edi, SCREEN_W                      ; down one row of characters (80 bytes)
-    add  esi, SCREEN_W * 2                  ; down one row of colours (160 bytes)
+    INVOKE GetWallPixel, kind, level, wallX, edx, lineH ; EAX = colour of this wall pixel
+PixStore:
+    mov  [edi], al                          ; store the colour role
+    add  edi, PIX_W                         ; next pixel row
     inc  ecx                                ; next row number
-    cmp  ecx, SCREEN_H                      ; all 24 rows done?
-    jb   ColumnRow                          ; no: next row
+    cmp  ecx, PIX_H                         ; all rows done?
+    jb   PixelRow                           ; no: continue
     ret                                     ; back to caller
-DrawColumn ENDP
+DrawPixelColumn ENDP
 
 ;-------------------------------------------------------------
-; IsMortar
-; Purpose:   Brick texture test for one wall cell on screen.
-;            texY = texRow * 8 / wallH (0..7): rows 0 and 4 are
-;            horizontal mortar. Vertical joints: bricks are 64
-;            wide (4 per cell); odd brick rows are shifted by 32,
-;            joint where (wallX + shift) mod 64 < 8.
-; Receives:  texRow = row inside the slice (0 = top)
-;            wallH  = real wall height in rows
-;            wallX  = position along the wall (0..255)
-; Returns:   EAX = 1 on mortar, 0 on brick
-; Registers: EAX (ECX, EDX saved by USES)
-;-------------------------------------------------------------
-IsMortar PROC USES ecx edx, texRow:DWORD, wallH:DWORD, wallX:DWORD
-    mov  eax, texRow                        ; EAX = row inside the slice
-    shl  eax, 3                             ; * 8 (8 texture rows per wall)
-    mov  edx, 0                             ; clear EDX before DIV
-    div  wallH                              ; EAX = texY (0..7), wallH is at least 1
-    cmp  eax, 0                             ; top mortar line?
-    je   MortarYes                          ; yes
-    cmp  eax, BRICK_ROW_H                   ; middle mortar line (texY = 4)?
-    je   MortarYes                          ; yes
-    mov  ecx, 0                             ; ECX = shift, 0 for the upper brick row
-    cmp  eax, BRICK_ROW_H                   ; lower brick row (texY 5..7)?
-    jb   HaveShift                          ; no: no shift
-    mov  ecx, BRICK_SHIFT                   ; yes: joints move by half a brick
-HaveShift:
-    mov  eax, wallX                         ; EAX = position along the wall
-    add  eax, ecx                           ; + shift
-    and  eax, BRICK_W - 1                   ; mod 64 (64 is a power of two)
-    cmp  eax, JOINT_W                       ; inside the joint?
-    jb   MortarYes                          ; yes: vertical mortar
-    mov  eax, 0                             ; brick
-    ret                                     ; back to caller
-MortarYes:
-    mov  eax, 1                             ; mortar
-    ret                                     ; back to caller
-IsMortar ENDP
-
-;-------------------------------------------------------------
-; GetColumnColor
-; Purpose:   Colour of one column's wall slice:
-;            edge column -> edge colour (black outline),
-;            exit door   -> blinking red-orange / yellow-orange,
-;            key         -> blinking gold / white,
-;            wall        -> shade for distance and side.
-; Receives:  column = screen x (0..79), uses the column arrays
-; Returns:   EAX = colour role
+; GetColumnKind
+; Purpose:   What a column's wall slice shows:
+;            edge line, exit door, key or plain wall.
+; Receives:  column = pixel column, uses the column arrays
+; Returns:   EAX = KIND_EDGE, KIND_DOOR, KIND_KEY or KIND_BRICK
 ; Registers: EAX (EBX saved by USES)
 ;-------------------------------------------------------------
-GetColumnColor PROC USES ebx, column:DWORD
+GetColumnKind PROC USES ebx, column:DWORD
     INVOKE IsEdgeColumn, column             ; EAX = 1 at an edge between walls
     cmp  eax, 0                             ; edge?
-    je   NotEdge                            ; no
-    mov  eax, EDGE_ATTR                     ; yes: dark outline line
-    ret                                     ; back to caller
-NotEdge:
+    mov  eax, KIND_EDGE                     ; (MOV keeps the flags)
+    jne  KindDone                           ; yes: edge line
     mov  ebx, column                        ; EBX = column
-    cmp  colType[ebx], HIT_EXIT             ; did the ray hit the exit door?
-    je   DoorColor                          ; yes
-    cmp  colType[ebx], HIT_KEY              ; did it hit a key?
-    je   KeyColor                           ; yes
-    movzx eax, hitSideCol[ebx]              ; EAX = side (0 or 1)
-    INVOKE GetWallLevel, colDist[ebx*4], eax ; EAX = shade level 0..3
-    movzx eax, wallColors[eax]              ; EAX = wall colour for that level
+    mov  eax, KIND_DOOR                     ; assume the exit door
+    cmp  colType[ebx], HIT_EXIT             ; exit door?
+    je   KindDone                           ; yes
+    mov  eax, KIND_KEY                      ; assume a key
+    cmp  colType[ebx], HIT_KEY              ; key?
+    je   KindDone                           ; yes
+    mov  eax, KIND_BRICK                    ; plain wall
+KindDone:
     ret                                     ; back to caller
-DoorColor:
-    mov  eax, DOOR_COLOR_A                  ; door colour 1 (red-orange)
+GetColumnKind ENDP
+
+;-------------------------------------------------------------
+; GetWallPixel
+; Purpose:   Colour of one pixel of a wall slice.
+;            edge     -> darkest colour
+;            door/key -> blinking colour, dark outline on the
+;                        first and last row
+;            brick    -> outline on the first and last row,
+;                        otherwise brick texture:
+;                        texY = texRow * 32 / lineH (0..31),
+;                        mortar row where texY mod 8 = 0,
+;                        joint where (wallX + shift) mod 64 < 6,
+;                        shift = 32 on every second brick row.
+; Receives:  kind, level (0..3), wallX (0..255),
+;            texRow (row inside the slice), lineH (pixels)
+; Returns:   EAX = colour role
+; Registers: EAX (ECX, EDX saved by USES)
+;-------------------------------------------------------------
+GetWallPixel PROC USES ecx edx, kind:DWORD, level:DWORD, wallX:DWORD, texRow:DWORD, lineH:DWORD
+    cmp  kind, KIND_EDGE                    ; edge line?
+    jne  NotEdgePix                         ; no
+    mov  eax, EDGE_ATTR                     ; yes: darkest colour
+    ret                                     ; back to caller
+NotEdgePix:
+    ; ----- first and last row: outline -----
+    cmp  texRow, 0                          ; first row of the slice?
+    je   OutlinePix                         ; yes
+    mov  eax, lineH                         ; EAX = height
+    dec  eax                                ; last row number
+    cmp  texRow, eax                        ; last row of the slice?
+    je   OutlinePix                         ; yes
+    cmp  kind, KIND_DOOR                    ; door?
+    je   DoorPix                            ; yes
+    cmp  kind, KIND_KEY                     ; key?
+    je   KeyPix                             ; yes
+    ; ----- brick texture -----
+    mov  eax, texRow                        ; EAX = row inside the slice
+    shl  eax, 5                             ; * 32 texture rows
+    mov  edx, 0                             ; clear EDX before DIV
+    div  lineH                              ; EAX = texY (0..31)
+    mov  ecx, eax                           ; ECX = texY
+    and  eax, BRICK_ROW_H - 1               ; texY mod 8
+    cmp  eax, 0                             ; mortar row?
+    je   MortarPix                          ; yes
+    mov  eax, 0                             ; EAX = shift, 0 on even brick rows
+    test ecx, BRICK_ROW_H                   ; odd brick row? (bit 3 of texY)
+    jz   HaveBrickShift                     ; no
+    mov  eax, BRICK_SHIFT                   ; yes: shift the joints by half a brick
+HaveBrickShift:
+    add  eax, wallX                         ; wallX + shift
+    and  eax, BRICK_W - 1                   ; mod 64
+    cmp  eax, JOINT_W                       ; inside a joint?
+    jb   MortarPix                          ; yes
+    mov  eax, level                         ; EAX = shade level
+    movzx eax, wallColors[eax]              ; brick colour
+    ret                                     ; back to caller
+MortarPix:
+    mov  eax, level                         ; EAX = shade level
+    movzx eax, wallColors[eax + 1]          ; one shade darker
+    ret                                     ; back to caller
+OutlinePix:
+    mov  eax, OUTLINE_ATTR                  ; dark outline
+    ret                                     ; back to caller
+DoorPix:
+    mov  eax, DOOR_COLOR_A                  ; door colour 1
     cmp  blinkOn, 0                         ; first half of the blink?
-    je   ColorDone                          ; yes: keep colour 1
-    mov  eax, DOOR_COLOR_B                  ; no: door colour 2 (yellow-orange)
+    je   PixDone                            ; yes
+    mov  eax, DOOR_COLOR_B                  ; no: door colour 2
     ret                                     ; back to caller
-KeyColor:
-    mov  eax, KEY_COLOR_A                   ; key colour 1 (gold)
+KeyPix:
+    mov  eax, KEY_COLOR_A                   ; key colour 1
     cmp  blinkOn, 0                         ; first half of the blink?
-    je   ColorDone                          ; yes: keep colour 1
-    mov  eax, KEY_COLOR_B                   ; no: key colour 2 (white)
-ColorDone:
+    je   PixDone                            ; yes
+    mov  eax, KEY_COLOR_B                   ; no: key colour 2
+PixDone:
     ret                                     ; back to caller
-GetColumnColor ENDP
+GetWallPixel ENDP
 
 ;-------------------------------------------------------------
 ; UpdateBlink
@@ -2127,9 +2132,9 @@ RenderView PROC USES ebx
     call CastAllRays                        ; pass 1: fill the column arrays
     mov  ebx, 0                             ; EBX = column x
 DrawNext:
-    INVOKE DrawColumn, ebx                  ; pass 2: draw this column
+    INVOKE DrawPixelColumn, ebx             ; pass 2: draw this pixel column
     inc  ebx                                ; next column
-    cmp  ebx, SCREEN_W                      ; all 80 columns done?
+    cmp  ebx, PIX_W                         ; all pixel columns done?
     jb   DrawNext                           ; no: next column
     ret                                     ; back to caller
 RenderView ENDP
@@ -2448,8 +2453,7 @@ FrameLoop:
     call RenderView                         ; 3D walls into the buffer
     call DrawMinimap                        ; map + player on top (only if switched on)
     call DrawHUD                            ; time, steps, controls on the last row
-    call ApplyRoles                         ; roles -> real console colours
-    call DrawBuffer                         ; show the frame on screen
+    call ComposeFrame                       ; pixels + text -> console in one call
     mov  eax, 30                            ; 30 milliseconds
     call Delay                              ; wait before the next frame
     jmp  FrameLoop                          ; next frame
