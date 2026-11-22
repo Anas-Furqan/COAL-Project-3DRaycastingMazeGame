@@ -92,6 +92,7 @@ RESULT_QUIT = 0                             ; GameLoop result: player pressed Q
 RESULT_WIN  = 1                             ; GameLoop result: player touched the exit
 RESULT_LOSE = 2                             ; GameLoop result: time ran out
 MS_PER_DAY  = 86400000                      ; GetMseconds restarts from 0 at midnight
+TIME_LIMIT  = 120                           ; seconds allowed to reach the exit
 
 ; ---------- HUD layout: where the numbers go inside the HUD row ----------
 HUD_MIN_POS  = 5                            ; "TIME mm:ss": minutes start at column 5
@@ -119,12 +120,11 @@ gameMap BYTE "################"             ; row 0  (outer wall)
         BYTE "################"             ; row 15 (outer wall)
 
 ; ---------- player data (positions are Q8: value = cells * 256) ----------
-posX      DWORD 384                         ; X = 1.5 cells (1*256 + 128), centre of column 1
-posY      DWORD 384                         ; Y = 1.5 cells (1*256 + 128), centre of row 1
-angle     DWORD 0                           ; facing direction in degrees (0..359), 0 = east
+posX      DWORD START_X                     ; X in Q8, set again by ResetGame
+posY      DWORD START_Y                     ; Y in Q8, set again by ResetGame
+angle     DWORD START_ANGLE                 ; facing direction in degrees (0..359), 0 = east
 steps     DWORD 0                           ; number of steps the player has taken
 startTime DWORD 0                           ; time (ms from GetMseconds) when the game started
-TIME_LIMIT DWORD 120                        ; seconds allowed to reach the exit
 
 ; ---------- game state flags ----------
 showMinimap BYTE 1                          ; 1 = minimap visible, 0 = hidden (M toggles)
