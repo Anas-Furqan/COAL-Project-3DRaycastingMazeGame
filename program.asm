@@ -158,23 +158,26 @@ TIMER_LOW_ATTR = lightRed + (black * 16)    ; timer colour when time is short: b
 
 .data
 ; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
-; '#' = wall, '.' = floor, 'E' = exit. Cell (row, col) is at gameMap + row*16 + col.
-gameMap BYTE "################"             ; row 0  (outer wall)
-        BYTE "#......#.......#"             ; row 1  (player starts at col 1)
-        BYTE "#.##.#.#.#####.#"             ; row 2
-        BYTE "#.#..#...#...#.#"             ; row 3
-        BYTE "#.#.####.#.#.#.#"             ; row 4
-        BYTE "#...#....#.#...#"             ; row 5
-        BYTE "###.#.####.###.#"             ; row 6
-        BYTE "#...#.#....#...#"             ; row 7
-        BYTE "#.###.#.####.#.#"             ; row 8
-        BYTE "#.#...#......#.#"             ; row 9
-        BYTE "#.#.#######.##.#"             ; row 10
-        BYTE "#...#.....#..#.#"             ; row 11
-        BYTE "#.###.###.##.#.#"             ; row 12
-        BYTE "#.....#......#.#"             ; row 13
-        BYTE "#.#####.######E#"             ; row 14 (exit at col 14)
-        BYTE "################"             ; row 15 (outer wall)
+; '#' = wall, '.' = floor, 'E' = exit, 'K' = key. Cell (row, col) is at
+; map + row*16 + col. originalMap is never changed; ResetGame copies it
+; into gameMap, the copy the game plays on (collected keys become '.').
+originalMap BYTE "################"         ; row 0  (outer wall)
+            BYTE "#......#.......#"         ; row 1  (player starts at col 1)
+            BYTE "#.##.#.#.#####.#"         ; row 2
+            BYTE "#.#..#...#..K#.#"         ; row 3  (key at col 12)
+            BYTE "#.#.####.#.#.#.#"         ; row 4
+            BYTE "#...#....#.#...#"         ; row 5
+            BYTE "###.#.####.###.#"         ; row 6
+            BYTE "#...#.#....#...#"         ; row 7
+            BYTE "#.###.#.####.#.#"         ; row 8
+            BYTE "#.#...#......#.#"         ; row 9
+            BYTE "#.#.#######.##.#"         ; row 10
+            BYTE "#...#.....#..#.#"         ; row 11
+            BYTE "#.###.###.##.#.#"         ; row 12
+            BYTE "#.....#......#.#"         ; row 13
+            BYTE "#K#####K######E#"         ; row 14 (keys at cols 1 and 7, exit at col 14)
+            BYTE "################"         ; row 15 (outer wall)
+gameMap     BYTE MAP_W * MAP_H DUP('#')   ; working copy of the map (filled by ResetGame)
 
 ; ---------- player data (positions are Q8: value = cells * 256) ----------
 posX      DWORD START_X                     ; X in Q8, set again by ResetGame
@@ -1403,14 +1406,20 @@ RenderView ENDP
 
 ;-------------------------------------------------------------
 ; ResetGame
-; Purpose:   Get ready for a new game: player back at the
-;            start, steps 0, flags cleared, timer started.
+; Purpose:   Get ready for a new game: fresh copy of the map
+;            (keys back in place), player back at the start,
+;            steps and keys 0, flags cleared, timer started.
 ; Receives:  nothing
-; Returns:   posX, posY, angle, steps, quitFlag, wonFlag,
-;            startTime set
-; Registers: none (EAX saved by USES)
+; Returns:   gameMap, posX, posY, angle, steps, keys, quitFlag,
+;            wonFlag, msgText, startTime set
+; Registers: none (EAX, ECX, ESI, EDI saved by USES)
 ;-------------------------------------------------------------
-ResetGame PROC USES eax
+ResetGame PROC USES eax ecx esi edi
+    cld                                     ; copy forwards
+    mov  esi, OFFSET originalMap            ; ESI = the untouched map
+    mov  edi, OFFSET gameMap                ; EDI = the map the game plays on
+    mov  ecx, MAP_W * MAP_H                 ; ECX = 256 bytes
+    rep  movsb                              ; copy [ESI] -> [EDI], 256 times
     mov  posX, START_X                      ; back to the start cell (X)
     mov  posY, START_Y                      ; back to the start cell (Y)
     mov  angle, START_ANGLE                 ; face east again
