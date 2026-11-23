@@ -1,355 +1,323 @@
-; ------------------------------------------------------------
-; WOLF-86 - 3D Raycasting Maze Game
-; Course:   EL-2003 COAL Lab, Fall 2026
-; Language: 32-bit x86 assembly (MASM) + Irvine32 library
-;
-; First-person 3D raycasting maze game in the Windows console.
-; Find the exit (E) before the 120-second timer runs out.
-; One ray per screen column (80) is cast with the DDA method.
-; All maths is integer fixed-point Q8 (value * 256), sin/cos
-; from a 360-entry table. No FPU / SSE instructions are used.
-; ------------------------------------------------------------
+; WOLF-86 - 3D Raycasting Maze Game (EL-2003 COAL Lab, Fall 2026)
 
-INCLUDE Irvine32.inc                        ; Irvine32 library procedures and Win32 prototypes
+INCLUDE Irvine32.inc
 
-; ---------- constants (no memory used, just names for numbers) ----------
-VIEW_COLS       = 100                       ; width of the 3D view in console cells
-VIEW_ROWS_CELLS = 30                        ; height of the 3D view in console cells
-SCREEN_W = VIEW_COLS                        ; console width in characters
-SCREEN_H = VIEW_ROWS_CELLS                  ; rows used by the 3D view
-BUF_H    = SCREEN_H + 1                     ; rows in the frame: view rows + 1 HUD row
-HUD_ROW  = SCREEN_H                         ; the HUD is the last row
-MAP_W    = 16                               ; map width in cells
-MAP_H    = 16                               ; map height in cells
-FOV      = 66                               ; field of view in degrees
+VIEW_COLS       = 100
+VIEW_ROWS_CELLS = 30
+SCREEN_W = VIEW_COLS
+SCREEN_H = VIEW_ROWS_CELLS
+BUF_H    = SCREEN_H + 1
+HUD_ROW  = SCREEN_H
+MAP_W    = 16
+MAP_H    = 16
+FOV      = 66
 
-; ---------- colour attributes = palette slot (background slot 0 = near-black sky) ----------
-C_SKY        = 0                            ; sky / background, edge lines
-C_BRICK_0    = 1                            ; blue brick, near (brightest)
-C_BRICK_1    = 2                            ; blue brick
-C_BRICK_2    = 3                            ; blue brick
-C_BRICK_3    = 4                            ; blue brick, far
-C_OUTLINE    = 5                            ; dark outline, darkest mortar and seams
-C_STONE_0    = 6                            ; slate stone, near
-C_TEXT       = 7                            ; normal text (light gray, unchanged)
-C_STONE_1    = 8                            ; slate stone
-C_STONE_2    = 9                            ; slate stone
-C_STONE_3    = 10                           ; slate stone, far
-C_FLOOR_NEAR = 11                           ; floor near the player
-C_FLOOR_FAR  = 12                           ; floor at the horizon
-C_DOOR_A     = 13                           ; door colour 1, danger (red-orange)
-C_GOLD       = 14                           ; keys, door colour 2, accents (gold)
-C_WHITE      = 15                           ; white (unchanged)
-C_WALL_0     = C_BRICK_0                    ; other names used by the title, HUD and minimap
-C_WALL_1     = C_BRICK_1                    ; logo gradient
-C_WALL_2     = C_BRICK_2                    ; logo gradient
-C_WALL_3     = C_BRICK_3                    ; logo gradient
-C_MAP_WALL   = C_BRICK_3                    ; minimap brick walls and borders
-C_DOOR_B     = C_GOLD                       ; door colour 2 and accent text
-C_DANGER     = C_DOOR_A                     ; timer under 20 s, lose banner
+C_SKY        = 0
+C_BRICK_0    = 1
+C_BRICK_1    = 2
+C_BRICK_2    = 3
+C_BRICK_3    = 4
+C_OUTLINE    = 5
+C_STONE_0    = 6
+C_TEXT       = 7
+C_STONE_1    = 8
+C_STONE_2    = 9
+C_STONE_3    = 10
+C_FLOOR_NEAR = 11
+C_FLOOR_FAR  = 12
+C_DOOR_A     = 13
+C_GOLD       = 14
+C_WHITE      = 15
+C_WALL_0     = C_BRICK_0
+C_WALL_1     = C_BRICK_1
+C_WALL_2     = C_BRICK_2
+C_WALL_3     = C_BRICK_3
+C_MAP_WALL   = C_BRICK_3
+C_DOOR_B     = C_GOLD
+C_DANGER     = C_DOOR_A
 
-; ---------- FIXMUL macro: Q8 fixed-point multiply ----------
-; dest = (dest * src) / 256. Two Q8 numbers multiplied give a
-; Q16 result, so SAR 8 brings it back to Q8 (SAR keeps the sign).
 FIXMUL MACRO dest, src
-    imul dest, src                          ;; dest = dest * src (signed)
-    sar  dest, 8                            ;; dest = dest / 256, sign kept
+    imul dest, src
+    sar  dest, 8
 ENDM
 
-; ---------- Win32 function not declared in SmallWin.inc (lives in user32.lib) ----------
-GetAsyncKeyState PROTO, vKey:DWORD          ; AX bit 15 = 1 if the key is held down right now
-SetConsoleOutputCP PROTO, wCodePageID:DWORD ; (kernel32.lib) choose which character set the console shows
+GetAsyncKeyState PROTO, vKey:DWORD
+SetConsoleOutputCP PROTO, wCodePageID:DWORD
 
-; ---------- console palette (kernel32.lib, not in SmallWin.inc) ----------
-; Same layout as the Windows CONSOLE_SCREEN_BUFFER_INFOEX structure (96 bytes).
-; ColorTable holds the 16 palette colours as COLORREF = 00BBGGRRh.
 CSBI_EX STRUCT
-  cbSize               DWORD ?              ; size of this structure (must be set before the call)
-  dwSize               COORD <>             ; buffer size in cells
-  dwCursorPosition     COORD <>             ; cursor position
-  wAttributes          WORD ?               ; current text colour
-  srWindow             SMALL_RECT <>        ; visible window rectangle
-  dwMaximumWindowSize  COORD <>             ; largest possible window
-  wPopupAttributes     WORD ?               ; colour of pop-up windows
-  bFullscreenSupported DWORD ?              ; full-screen flag
-  ColorTable           DWORD 16 DUP(?)      ; the 16 palette colours
+  cbSize               DWORD ?
+  dwSize               COORD <>
+  dwCursorPosition     COORD <>
+  wAttributes          WORD ?
+  srWindow             SMALL_RECT <>
+  dwMaximumWindowSize  COORD <>
+  wPopupAttributes     WORD ?
+  bFullscreenSupported DWORD ?
+  ColorTable           DWORD 16 DUP(?)
 CSBI_EX ENDS
-GetConsoleScreenBufferInfoEx PROTO, hConsole:DWORD, lpInfo:PTR CSBI_EX ; EAX = 0 on failure
-SetConsoleScreenBufferInfoEx PROTO, hConsole:DWORD, lpInfo:PTR CSBI_EX ; EAX = 0 on failure
+GetConsoleScreenBufferInfoEx PROTO, hConsole:DWORD, lpInfo:PTR CSBI_EX
+SetConsoleScreenBufferInfoEx PROTO, hConsole:DWORD, lpInfo:PTR CSBI_EX
 
-; ---------- console window (kernel32 / user32, not in SmallWin.inc) ----------
-GetConsoleWindow PROTO                      ; EAX = window handle of the console
-GetWindowLongA   PROTO, hWnd:DWORD, nIndex:SDWORD                 ; EAX = window value (style)
-SetWindowLongA   PROTO, hWnd:DWORD, nIndex:SDWORD, dwNewLong:DWORD ; change a window value
-GWL_STYLE      = -16                        ; index of the window style
-GetModuleFileNameA PROTO, hModule:DWORD, lpFilename:PTR BYTE, nSize:DWORD ; EAX = length of the exe path
-GetClassNameA    PROTO, hWnd:DWORD, lpClassName:PTR BYTE, nMaxCount:DWORD ; window class name
-WS_MAXIMIZEBOX = 00010000h                  ; style bit: maximize button
-WS_SIZEBOX     = 00040000h                  ; style bit: resizable border
+GetConsoleWindow PROTO
+GetWindowLongA   PROTO, hWnd:DWORD, nIndex:SDWORD
+SetWindowLongA   PROTO, hWnd:DWORD, nIndex:SDWORD, dwNewLong:DWORD
+GWL_STYLE      = -16
+GetModuleFileNameA PROTO, hModule:DWORD, lpFilename:PTR BYTE, nSize:DWORD
+GetClassNameA    PROTO, hWnd:DWORD, lpClassName:PTR BYTE, nMaxCount:DWORD
+WS_MAXIMIZEBOX = 00010000h
+WS_SIZEBOX     = 00040000h
 
-; ---------- procedure prototypes ----------
-GetSin      PROTO                           ; EAX = angle in, EAX = sin*256 out
-GetCos      PROTO                           ; EAX = angle in, EAX = cos*256 out
-TitleScreen PROTO                           ; shows the title screen, EAX = key pressed
-PrintArt    PROTO, artPtr:PTR BYTE, colorPtr:PTR BYTE, lines:DWORD, row:DWORD, col:DWORD ; coloured text lines, '#' = block
-ResetGame   PROTO                           ; puts the player at the start, restarts the timer
-GetElapsedSec PROTO                         ; EAX = seconds since the game started
-GetRemainingSec PROTO                       ; EAX = seconds left (0 if time is up)
-PutNumber   PROTO, dest:PTR BYTE, value:DWORD, digits:DWORD ; writes digits into memory
-DrawHUD     PROTO                           ; fills the HUD row of frameBuffer
-PrintTwoDigits PROTO                        ; EAX = 0..99, prints it with 2 digits
-PrintTime   PROTO                           ; EAX = seconds, prints mm:ss
-WinScreen   PROTO                           ; shows the "you escaped" screen
-LoseScreen  PROTO                           ; shows the "time's up" screen
-AskPlayAgain PROTO                          ; EAX = 1 for Y, 0 for N or Q
-ClearBuffer PROTO                           ; empties the text overlay (frameBuffer, attrBuffer)
-HideCursor  PROTO                           ; hides the blinking console cursor
-SetupWindow PROTO                           ; console buffer and window = exactly the game size
-OpenLog     PROTO                           ; debug: create wolf_debug.log next to the exe
-CloseLog    PROTO                           ; debug: close the log file
-LogText     PROTO, textPtr:PTR BYTE         ; debug: write a 0-terminated text
-LogNum      PROTO, textPtr:PTR BYTE, value:DWORD ; debug: text + number + new line
-LogCall     PROTO, textPtr:PTR BYTE, retVal:DWORD, errVal:DWORD ; debug: call name, return value, GetLastError
-LogInfo     PROTO, infoPtr:PTR CSBI_EX      ; debug: buffer size, window rect, colours 0..2
-LoadPalette PROTO                           ; saves the console palette, installs the blue/orange theme
-RestorePalette PROTO                        ; puts the saved palette back
-SetPalette  PROTO, infoPtr:PTR CSBI_EX      ; EAX = 1 if the palette in *infoPtr was applied
-TryConhostPalette PROTO                     ; EAX = 1 if the theme is set and read back correctly
-IsPseudoConsole PROTO                       ; EAX = 1 in Windows Terminal (pseudo console)
-SetPaletteVT PROTO                          ; theme colours via VT sequences (Windows Terminal)
-PutHex2     PROTO, dest:PTR BYTE, value:DWORD ; two hex digits
-SetRoleColor PROTO                          ; EAX = colour role in, sets the console text colour
-ComposeFrame PROTO                          ; pixels + text -> CHAR_INFO buffer -> one WriteConsoleOutput
-WriteConsoleOutputA PROTO, hConsole:DWORD, lpBuffer:PTR DWORD, dwBufferSize:COORD, dwBufferCoord:COORD, lpWriteRegion:PTR SMALL_RECT ; (kernel32) draw a block of CHAR_INFO cells
-GetMoveDelta PROTO                          ; returns EAX = dx, EDX = dy for one step forward
-IsWall      PROTO, testX:SDWORD, testY:SDWORD     ; EAX = CELL_FREE / CELL_WALL / CELL_EXIT
-BoxCheck    PROTO, testX:SDWORD, testY:SDWORD ; EAX = what the player's box touches at (x, y)
-CenterAssist PROTO                          ; nudges the player to the corridor centre
-CenterNudge PROTO, axisPos:SDWORD            ; EAX = step towards the cell centre (-4..4)
-GetTurnSpeed PROTO                          ; EAX = degrees to turn this frame (2..5)
-TryMove     PROTO, moveDX:SDWORD, moveDY:SDWORD   ; moves the player if no wall is in the way
-HandleCell  PROTO, cellType:DWORD, testX:SDWORD, testY:SDWORD ; exit / key touched by a probe
-CollectKey  PROTO, testX:SDWORD, testY:SDWORD     ; removes the key there, keys++, message
-TouchExit   PROTO                           ; win with 3 keys, else "door locked" message
-ShowMessage PROTO, msgPtr:PTR BYTE, msgAttr:DWORD ; show a HUD message for 2 seconds
-MsSince     PROTO, since:DWORD              ; EAX = ms since an earlier GetMseconds value
-DrawMessage PROTO                           ; writes the active message into the HUD row
-InitInput   PROTO                           ; gets the console input handle
-KeyDown     PROTO, vKey:DWORD               ; EAX = 1 if key is held down now
-KeyPressed  PROTO, vKey:DWORD, prevPtr:PTR BYTE   ; EAX = 1 only on the frame the key goes down
-GetArrowChar PROTO                          ; AL = '>', 'v', '<' or '^' for the current angle
-WrapAngle   PROTO                           ; EAX = angle in, EAX = same angle wrapped to 0..359
-UpdateBlink PROTO                           ; blinkOn = 0 or 1, flips every 500 ms
-AnyKeyDown  PROTO                           ; EAX = 1 if any keyboard key is held
-WaitKeysReleased PROTO                      ; waits until keys are let go, sets mWasDown/qWasDown
-SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD ; DDA setup for one axis (EAX, EBX, ECX out)
-CastRay     PROTO, rayDirX:SDWORD, rayDirY:SDWORD ; EAX = distance (Q8), EDX = hitSide, ECX = hit type
-GetWallLevel PROTO, distance:DWORD, side:DWORD    ; EAX = wall shade level 0..3 for a distance
-GetFloorPixel PROTO, column:DWORD           ; ECX = pixel row in, EAX = floor colour role
-GetWallHeight PROTO                         ; EAX = distance in, EAX = real wall height in rows
-DrawPixelColumn PROTO, column:DWORD         ; draws one pixel column into pixBuf
-GetColumnKind PROTO, column:DWORD           ; EAX = KIND_EDGE / DOOR / KEY / BRICK / STONE
-GetWallPixel PROTO, kind:DWORD, level:DWORD, wallX:DWORD, texRow:DWORD, lineH:DWORD ; EAX = colour of one wall pixel
-CastAllRays PROTO                           ; casts the 80 rays into the column arrays
-IsEdgeColumn PROTO, column:DWORD            ; EAX = 1 if the column is an edge between walls
-IsStar      PROTO, rayAngle:DWORD           ; ECX = row in, EAX = 1 if a star is at this ceiling cell
-RenderView  PROTO                           ; casts 80 rays and draws the 3D view
-TurnPlayer  PROTO, turnAmount:SDWORD        ; adds turnAmount to angle, wraps to 0..359
-HandleInput PROTO                           ; reads one key (no waiting) and acts on it
-DrawMinimap PROTO                           ; coloured map + border + direction arrow into the frame
-DrawMapBorder PROTO                         ; box around the minimap
-GetMapLook  PROTO                           ; EAX = map char in, EAX = screen char, EBX = colour out
-PutCell     PROTO, row:DWORD, col:DWORD, cellChar:DWORD, cellAttr:DWORD ; one char + colour into the frame
-GameLoop    PROTO                           ; main loop, EAX = RESULT_QUIT / WIN / LOSE
+GetSin      PROTO
+GetCos      PROTO
+TitleScreen PROTO
+PrintArt    PROTO, artPtr:PTR BYTE, colorPtr:PTR BYTE, lines:DWORD, row:DWORD, col:DWORD
+ResetGame   PROTO
+GetElapsedSec PROTO
+GetRemainingSec PROTO
+PutNumber   PROTO, dest:PTR BYTE, value:DWORD, digits:DWORD
+DrawHUD     PROTO
+PrintTwoDigits PROTO
+PrintTime   PROTO
+WinScreen   PROTO
+LoseScreen  PROTO
+AskPlayAgain PROTO
+ClearBuffer PROTO
+HideCursor  PROTO
+SetupWindow PROTO
+OpenLog     PROTO
+CloseLog    PROTO
+LogText     PROTO, textPtr:PTR BYTE
+LogNum      PROTO, textPtr:PTR BYTE, value:DWORD
+LogCall     PROTO, textPtr:PTR BYTE, retVal:DWORD, errVal:DWORD
+LogInfo     PROTO, infoPtr:PTR CSBI_EX
+LoadPalette PROTO
+RestorePalette PROTO
+SetPalette  PROTO, infoPtr:PTR CSBI_EX
+TryConhostPalette PROTO
+IsPseudoConsole PROTO
+SetPaletteVT PROTO
+PutHex2     PROTO, dest:PTR BYTE, value:DWORD
+SetRoleColor PROTO
+ComposeFrame PROTO
+WriteConsoleOutputA PROTO, hConsole:DWORD, lpBuffer:PTR DWORD, dwBufferSize:COORD, dwBufferCoord:COORD, lpWriteRegion:PTR SMALL_RECT
+GetMoveDelta PROTO
+IsWall      PROTO, testX:SDWORD, testY:SDWORD
+BoxCheck    PROTO, testX:SDWORD, testY:SDWORD
+CenterAssist PROTO
+CenterNudge PROTO, axisPos:SDWORD
+GetTurnSpeed PROTO
+TryMove     PROTO, moveDX:SDWORD, moveDY:SDWORD
+HandleCell  PROTO, cellType:DWORD, testX:SDWORD, testY:SDWORD
+CollectKey  PROTO, testX:SDWORD, testY:SDWORD
+TouchExit   PROTO
+ShowMessage PROTO, msgPtr:PTR BYTE, msgAttr:DWORD
+MsSince     PROTO, since:DWORD
+DrawMessage PROTO
+InitInput   PROTO
+KeyDown     PROTO, vKey:DWORD
+KeyPressed  PROTO, vKey:DWORD, prevPtr:PTR BYTE
+GetArrowChar PROTO
+WrapAngle   PROTO
+UpdateBlink PROTO
+AnyKeyDown  PROTO
+WaitKeysReleased PROTO
+SetupAxis   PROTO, axisPos:SDWORD, axisDir:SDWORD
+CastRay     PROTO, rayDirX:SDWORD, rayDirY:SDWORD
+GetWallLevel PROTO, distance:DWORD, side:DWORD
+GetFloorPixel PROTO, column:DWORD
+GetWallHeight PROTO
+DrawPixelColumn PROTO, column:DWORD
+GetColumnKind PROTO, column:DWORD
+GetWallPixel PROTO, kind:DWORD, level:DWORD, wallX:DWORD, texRow:DWORD, lineH:DWORD
+CastAllRays PROTO
+IsEdgeColumn PROTO, column:DWORD
+IsStar      PROTO, rayAngle:DWORD
+RenderView  PROTO
+TurnPlayer  PROTO, turnAmount:SDWORD
+HandleInput PROTO
+DrawMinimap PROTO
+DrawMapBorder PROTO
+GetMapLook  PROTO
+PutCell     PROTO, row:DWORD, col:DWORD, cellChar:DWORD, cellAttr:DWORD
+GameLoop    PROTO
 
-; ---------- movement settings ----------
-MOVE_SPEED = 32                             ; one step = 32/256 = 1/8 of a cell (Q8)
-PLAYER_R   = 80                             ; collision box half-size: 80/256 = 0.31 cell
-CELL_SIZE  = 256                            ; one map cell in Q8
-NUDGE_MAX  = 4                              ; corridor centering: at most 4 Q8 units per frame
-TURN_RAMP_LEN = 10                          ; entries in turnRamp
+MOVE_SPEED = 32
+PLAYER_R   = 80
+CELL_SIZE  = 256
+NUDGE_MAX  = 4
+TURN_RAMP_LEN = 10
 
-; ---------- raycasting settings ----------
-BIG_DIST   = 1000000                        ; "infinite" distance, used when a ray never crosses an axis
-KEY_WAIT_TRIES = 200                        ; max 200 x 10 ms = 2 s waiting for keys to be released
-CODE_PAGE_437  = 437                        ; old IBM PC character set (has the block characters)
-PIX_W          = VIEW_COLS                  ; pixel columns of the 3D view (one ray each)
-MIN_WALL_DIST  = 64                         ; distance used for wall height is at least 1/4 cell
-CONTACT_ROWS   = 2                          ; wall rows darkened at the bottom (contact shadow)
-FLOOR_SHADOW   = 2                          ; floor rows darkened under each wall
-SHADOW_ATTR    = C_FLOOR_FAR                ; colour of the floor shadow
-PIX_H          = VIEW_ROWS_CELLS * 2        ; pixel rows: two pixels per console cell
-HORIZON        = PIX_H / 2                  ; pixel row of the horizon
-HALF_BLOCK     = 223                        ; code page 437 upper half block
-FLOOR_BANDS    = 5                          ; floor gradient bands (dithered)
-KIND_EDGE      = 0                          ; wall slice kinds (GetColumnKind)
-KIND_DOOR      = 1                          ; exit door
-KIND_KEY       = 2                          ; key
-KIND_BRICK     = 3                          ; brick wall '#'
-KIND_STONE     = 4                          ; stone wall '%'
-WALL_CHAR      = 219                        ; code page 437 full block: every wall cell
-STAR_CHAR      = '.'                        ; a star in the night sky
-STAR_ATTR      = C_STONE_3                  ; stars: dim grey-violet
-STAR_MOD       = 61                         ; star if (rayAngle*7 + row*13) mod 61 = 0 (few stars)
-PLANE_LEN      = 166                        ; tan(33 degrees) * 256: half-width of the camera plane (FOV 66)
-TEX_ROWS       = 32                         ; texture rows per wall cell (texY = 0..31)
-BRICK_ROW_H    = 8                          ; brick height in texture rows (4 brick rows per cell)
-BRICK_W        = 64                         ; brick width in wallX units (4 bricks per cell)
-BRICK_SHIFT    = 32                         ; odd brick rows are shifted by half a brick
-JOINT_W        = 6                          ; vertical brick joint width in wallX units
-STONE_ROW_H    = 16                         ; stone block height in texture rows (2 per cell)
-STONE_W        = 128                        ; stone block width in wallX units (2 per cell)
-STONE_SHIFT    = 64                         ; odd stone rows are shifted by half a block
-SEAM_W         = 4                          ; vertical stone seam width in wallX units
+BIG_DIST   = 1000000
+KEY_WAIT_TRIES = 200
+CODE_PAGE_437  = 437
+PIX_W          = VIEW_COLS
+MIN_WALL_DIST  = 64
+CONTACT_ROWS   = 2
+FLOOR_SHADOW   = 2
+SHADOW_ATTR    = C_FLOOR_FAR
+PIX_H          = VIEW_ROWS_CELLS * 2
+HORIZON        = PIX_H / 2
+HALF_BLOCK     = 223
+FLOOR_BANDS    = 5
+KIND_EDGE      = 0
+KIND_DOOR      = 1
+KIND_KEY       = 2
+KIND_BRICK     = 3
+KIND_STONE     = 4
+WALL_CHAR      = 219
+STAR_CHAR      = '.'
+STAR_ATTR      = C_STONE_3
+STAR_MOD       = 61
+PLANE_LEN      = 166
+TEX_ROWS       = 32
+BRICK_ROW_H    = 8
+BRICK_W        = 64
+BRICK_SHIFT    = 32
+JOINT_W        = 6
+STONE_ROW_H    = 16
+STONE_W        = 128
+STONE_SHIFT    = 64
+SEAM_W         = 4
 
-; ---------- title / end screen layout (row, column on the console) ----------
-ART_LINES   = 5                             ; block letters are 5 rows tall
-BOX_LINES   = 10                            ; controls box: top, 8 text lines, bottom
-TITLE_TOP   = (BUF_H - 22) / 2              ; title screen (22 rows) centred vertically
-LOGO_ROW    = TITLE_TOP                     ; logo: 5 rows
-LOGO_COL    = (SCREEN_W - 41) / 2           ; logo (41 wide) centred
-SUB_ROW     = TITLE_TOP + 6                 ; subtitle row
-SUB_COL     = (SCREEN_W - 41) / 2           ; subtitle (41 wide) centred
-BOX_ROW     = TITLE_TOP + 8                 ; controls box: 10 rows
-BOX_COL     = (SCREEN_W - 46) / 2           ; box (46 wide) centred
-PRESS_ROW   = TITLE_TOP + 20                ; blinking prompt row
-PRESS_COL   = (SCREEN_W - 13) / 2           ; prompt (13 wide) centred
-TITLE_DELAY = 50                            ; ms between title screen redraws
-BANNER_ROW  = TITLE_TOP + 2                 ; end screen banner: 5 rows
-WIN_COL     = (SCREEN_W - 47) / 2           ; "ESCAPED!" (47 wide) centred
-LOSE_COL    = (SCREEN_W - 41) / 2           ; "TIME UP" (41 wide) centred
-INFO_ROW    = BANNER_ROW + 7                ; first line of time / steps
-INFO_COL    = LOSE_COL                      ; column of the info lines
-ASK_ROW     = INFO_ROW + 4                  ; row of "Play again? (Y/N)"
+ART_LINES   = 5
+BOX_LINES   = 10
+TITLE_TOP   = (BUF_H - 22) / 2
+LOGO_ROW    = TITLE_TOP
+LOGO_COL    = (SCREEN_W - 41) / 2
+SUB_ROW     = TITLE_TOP + 6
+SUB_COL     = (SCREEN_W - 41) / 2
+BOX_ROW     = TITLE_TOP + 8
+BOX_COL     = (SCREEN_W - 46) / 2
+PRESS_ROW   = TITLE_TOP + 20
+PRESS_COL   = (SCREEN_W - 13) / 2
+TITLE_DELAY = 50
+BANNER_ROW  = TITLE_TOP + 2
+WIN_COL     = (SCREEN_W - 47) / 2
+LOSE_COL    = (SCREEN_W - 41) / 2
+INFO_ROW    = BANNER_ROW + 7
+INFO_COL    = LOSE_COL
+ASK_ROW     = INFO_ROW + 4
 
-; ---------- minimap look ----------
-MAP_BOX       = MAP_H + 1                   ; border row/column on the far side (17)
-BOX_TL        = 218                         ; code page 437 box corners and lines
-BOX_TR        = 191                         ; top-right corner
-BOX_BL        = 192                         ; bottom-left corner
-BOX_BR        = 217                         ; bottom-right corner
-BOX_H         = 196                         ; horizontal line
-BOX_V         = 179                         ; vertical line
-BORDER_ATTR   = C_MAP_WALL                  ; border: slot 9 (C_MAP_WALL)
-MAP_WALL_ATTR = C_MAP_WALL                  ; brick walls on the minimap
-MAP_STONE_ATTR = C_STONE_2                  ; stone walls on the minimap
-MAP_EXIT_ATTR = C_DOOR_A                    ; exit: slot 10 (C_DOOR_A, red-orange)
-MAP_KEY_ATTR  = C_GOLD                      ; keys: slot 12 (C_GOLD)
-PLAYER_ATTR   = C_GOLD                      ; player arrow: slot 12 (C_GOLD)
-DOOR_COLOR_A   = C_DOOR_A                   ; exit door colour 1: slot 10 (red-orange)
-DOOR_COLOR_B   = C_DOOR_B                   ; exit door colour 2: slot 11 (yellow-orange)
-KEY_COLOR_A    = C_GOLD                     ; key pillar colour 1: slot 12 (gold)
-EDGE_ATTR      = C_SKY                      ; edge lines between walls: background colour
-OUTLINE_ATTR   = C_OUTLINE                  ; first and last row of a wall slice
-KEY_COLOR_B    = C_WHITE                    ; key pillar colour 2: slot 15 (white)
-HIT_WALL       = 0                          ; CastRay hit type: normal wall
-HIT_EXIT       = 1                          ; CastRay hit type: exit door
-HIT_KEY        = 2                          ; CastRay hit type: key
-DEFAULT_ATTR   = C_TEXT                     ; normal colour: slot 7 text on slot 0 background
+MAP_BOX       = MAP_H + 1
+BOX_TL        = 218
+BOX_TR        = 191
+BOX_BL        = 192
+BOX_BR        = 217
+BOX_H         = 196
+BOX_V         = 179
+BORDER_ATTR   = C_MAP_WALL
+MAP_WALL_ATTR = C_MAP_WALL
+MAP_STONE_ATTR = C_STONE_2
+MAP_EXIT_ATTR = C_DOOR_A
+MAP_KEY_ATTR  = C_GOLD
+PLAYER_ATTR   = C_GOLD
+DOOR_COLOR_A   = C_DOOR_A
+DOOR_COLOR_B   = C_DOOR_B
+KEY_COLOR_A    = C_GOLD
+EDGE_ATTR      = C_SKY
+OUTLINE_ATTR   = C_OUTLINE
+KEY_COLOR_B    = C_WHITE
+HIT_WALL       = 0
+HIT_EXIT       = 1
+HIT_KEY        = 2
+DEFAULT_ATTR   = C_TEXT
 
-; ---------- cell types returned by IsWall ----------
-CELL_FREE = 0                               ; floor: can walk here
-CELL_WALL = 1                               ; '#': blocks movement
-CELL_EXIT = 2                               ; 'E': blocks movement, touching it with 3 keys wins
-CELL_KEY  = 3                               ; 'K': blocks movement, touching it collects the key
-KEYS_NEEDED   = 3                           ; keys needed to open the exit door
-MSG_MS        = 2000                        ; HUD messages stay for 2 seconds
-KEY_MSG_DIGIT = 11                          ; position of n in "KEY FOUND! n/3"
-KEY_MSG_ATTR  = C_DOOR_B                    ; "KEY FOUND" message: slot 11 (accent)
-LOCKED_ATTR   = C_DOOR_B                    ; "DOOR LOCKED" message: slot 11 (accent)
+CELL_FREE = 0
+CELL_WALL = 1
+CELL_EXIT = 2
+CELL_KEY  = 3
+KEYS_NEEDED   = 3
+MSG_MS        = 2000
+KEY_MSG_DIGIT = 11
+KEY_MSG_ATTR  = C_DOOR_B
+LOCKED_ATTR   = C_DOOR_B
 
-; ---------- game start values and results ----------
-START_X     = 384                           ; 1.5 cells: centre of column 1
-START_Y     = 384                           ; 1.5 cells: centre of row 1
-START_ANGLE = 0                             ; facing east
-RESULT_QUIT = 0                             ; GameLoop result: player pressed Q
-RESULT_WIN  = 1                             ; GameLoop result: player touched the exit
-RESULT_LOSE = 2                             ; GameLoop result: time ran out
-MS_PER_DAY  = 86400000                      ; GetMseconds restarts from 0 at midnight
-BLINK_MS    = 500                           ; blinking things change colour every 500 ms
-TIME_LIMIT  = 180                           ; seconds allowed to find the keys and escape
+START_X     = 384
+START_Y     = 384
+START_ANGLE = 0
+RESULT_QUIT = 0
+RESULT_WIN  = 1
+RESULT_LOSE = 2
+MS_PER_DAY  = 86400000
+BLINK_MS    = 500
+TIME_LIMIT  = 180
 
-; ---------- HUD layout: where the numbers go inside the HUD row ----------
-HUD_MIN_POS  = 5                            ; "TIME mm:ss": minutes start at column 5
-HUD_SEC_POS  = 8                            ; seconds start at column 8
-HUD_STEP_POS = 18                           ; "STEPS nnnnn": steps start at column 18
-HUD_KEY_POS  = 30                           ; "KEYS n/3": the key count is at column 30
-HUD_MSG_POS  = 35                           ; messages replace the controls text from column 35
-HUD_TIME_LEN = 10                           ; "TIME mm:ss" is 10 characters
-LOW_TIME     = 20                           ; timer turns red below 20 seconds
-TIMER_ATTR     = C_WHITE                    ; timer colour: slot 15 (white)
-TIMER_LOW_ATTR = C_DANGER                   ; timer under 20 s: slot 13 (danger)
-KEYS_ATTR      = C_GOLD                     ; "KEYS n/3": slot 12 (gold)
-HUD_KEYS_COL   = 25                         ; "KEYS n/3" starts at column 25
-HUD_KEYS_LEN   = 8                          ; "KEYS n/3" is 8 characters
+HUD_MIN_POS  = 5
+HUD_SEC_POS  = 8
+HUD_STEP_POS = 18
+HUD_KEY_POS  = 30
+HUD_MSG_POS  = 35
+HUD_TIME_LEN = 10
+LOW_TIME     = 20
+TIMER_ATTR     = C_WHITE
+TIMER_LOW_ATTR = C_DANGER
+KEYS_ATTR      = C_GOLD
+HUD_KEYS_COL   = 25
+HUD_KEYS_LEN   = 8
 
-; ---------- theme colours: COLORREF = 00BBGGRRh (web #RRGGBB written backwards) ----------
-RGB_SKY        = 001A0E0Ah                  ; slot 0  sky                #0A0E1A
-RGB_BRICK_0    = 00FFC6A9h                  ; slot 1  brick near         #A9C6FF
-RGB_BRICK_1    = 00F09C7Ch                  ; slot 2  brick              #7C9CF0
-RGB_BRICK_2    = 00D0725Ah                  ; slot 3  brick              #5A72D0
-RGB_BRICK_3    = 00A85444h                  ; slot 4  brick far          #4454A8
-RGB_OUTLINE    = 00451F1Ah                  ; slot 5  outline / mortar   #1A1F45
-RGB_STONE_0    = 00B88F8Ah                  ; slot 6  stone near         #8A8FB8
-RGB_STONE_1    = 009C736Fh                  ; slot 8  stone              #6F739C
-RGB_STONE_2    = 00805A56h                  ; slot 9  stone              #565A80
-RGB_STONE_3    = 0066423Eh                  ; slot 10 stone far          #3E4266
-RGB_FLOOR_NEAR = 0044342Eh                  ; slot 11 floor near         #2E3444
-RGB_FLOOR_FAR  = 001E1714h                  ; slot 12 floor far          #14171E
-RGB_DOOR_A     = 002B6AFFh                  ; slot 13 door / danger      #FF6A2B red-orange
-RGB_GOLD       = 004AC9FFh                  ; slot 14 keys / door B      #FFC94A gold
-PAL_KEEP_TEXT  = 7                          ; slot 7 (light gray text) keeps its colour
-PAL_KEEP_WHITE = 15                         ; slot 15 (white) keeps its colour
-PAL_SLOTS      = 16                         ; the console has 16 colour slots
-PAL_TRIES      = 2                          ; conhost: try to set the palette twice
-PAL_MODE_NONE  = 0                          ; palette not changed (standard colours)
-PAL_MODE_CONHOST = 1                        ; set with SetConsoleScreenBufferInfoEx
-PAL_MODE_VT    = 2                          ; set with VT sequences (Windows Terminal)
-VT_PROCESSING  = 0004h                      ; ENABLE_VIRTUAL_TERMINAL_PROCESSING
-VT_IDX_POS     = 4                          ; vtTemplate: position of the colour number
-VT_RED_POS     = 11                         ; vtTemplate: position of RR
-VT_GREEN_POS   = 14                         ; vtTemplate: position of GG
-VT_BLUE_POS    = 17                         ; vtTemplate: position of BB
-FORCE_FALLBACK = 0                          ; debug: 1 = pretend the palette call failed
-DEBUG_LOG      = 0                          ; debug: 1 = write wolf_debug.log next to the exe
-
+RGB_SKY        = 001A0E0Ah
+RGB_BRICK_0    = 00FFC6A9h
+RGB_BRICK_1    = 00F09C7Ch
+RGB_BRICK_2    = 00D0725Ah
+RGB_BRICK_3    = 00A85444h
+RGB_OUTLINE    = 00451F1Ah
+RGB_STONE_0    = 00B88F8Ah
+RGB_STONE_1    = 009C736Fh
+RGB_STONE_2    = 00805A56h
+RGB_STONE_3    = 0066423Eh
+RGB_FLOOR_NEAR = 0044342Eh
+RGB_FLOOR_FAR  = 001E1714h
+RGB_DOOR_A     = 002B6AFFh
+RGB_GOLD       = 004AC9FFh
+PAL_KEEP_TEXT  = 7
+PAL_KEEP_WHITE = 15
+PAL_SLOTS      = 16
+PAL_TRIES      = 2
+PAL_MODE_NONE  = 0
+PAL_MODE_CONHOST = 1
+PAL_MODE_VT    = 2
+VT_PROCESSING  = 0004h
+VT_IDX_POS     = 4
+VT_RED_POS     = 11
+VT_GREEN_POS   = 14
+VT_BLUE_POS    = 17
+FORCE_FALLBACK = 0
+DEBUG_LOG      = 0
 
 .data
-; ---------- console palette ----------
-themeColors DWORD RGB_SKY, RGB_BRICK_0, RGB_BRICK_1, RGB_BRICK_2   ; slots 0-3
-            DWORD RGB_BRICK_3, RGB_OUTLINE, RGB_STONE_0, 0       ; slots 4-7 (7 is kept)
-            DWORD RGB_STONE_1, RGB_STONE_2, RGB_STONE_3, RGB_FLOOR_NEAR ; slots 8-11
-            DWORD RGB_FLOOR_FAR, RGB_DOOR_A, RGB_GOLD, 0         ; slots 12-15 (15 is kept)
-origInfo    CSBI_EX <>                      ; the console settings found at start (restored at exit)
-themeInfo   CSBI_EX <>                      ; the same settings with the theme colours
-paletteOK   DWORD 0                         ; 1 if the theme palette was installed
-paletteMode DWORD PAL_MODE_NONE             ; how the theme was installed (for RestorePalette)
-origOutMode DWORD 0                         ; console output mode before VT was switched on
-classText   BYTE 64 DUP(0)                  ; console window class name
-pseudoName  BYTE "PseudoConsoleWindow", 0   ; class name used by Windows Terminal
-ansiOrder   BYTE 0, 4, 2, 6, 1, 5, 3, 7, 8, 12, 10, 14, 9, 13, 11, 15 ; console slot -> ANSI colour number
-hexDigits   BYTE "0123456789abcdef"         ; for PutHex2
-vtTemplate  BYTE 27, "]4;00;rgb:00/00/00", 27, 5Ch ; OSC 4: set one palette colour (5Ch = backslash)
-VT_LEN = ($ - vtTemplate)                   ; 21 bytes
-vtBuf       BYTE VT_LEN DUP(0)              ; one filled-in sequence
-vtReset     BYTE 27, "]104", 27, 5Ch       ; OSC 104: reset all palette colours
-VT_RESET_LEN = ($ - vtReset)                ; 7 bytes
-vtWritten   DWORD 0                         ; WriteConsole stores the count here
-tinyRect    SMALL_RECT <0, 0, 0, 0>          ; 1x1 window, so the buffer can shrink
-gameRect    SMALL_RECT <0, 0, SCREEN_W - 1, BUF_H - 1> ; the window we want (inclusive corners)
-gameSize    COORD <SCREEN_W, BUF_H>         ; the buffer size we want
-windowOK    DWORD 0                         ; 1 if the window was set to the game size
-checkInfo   CSBI_EX <>                      ; console settings read back after a change
+themeColors DWORD RGB_SKY, RGB_BRICK_0, RGB_BRICK_1, RGB_BRICK_2
+            DWORD RGB_BRICK_3, RGB_OUTLINE, RGB_STONE_0, 0
+            DWORD RGB_STONE_1, RGB_STONE_2, RGB_STONE_3, RGB_FLOOR_NEAR
+            DWORD RGB_FLOOR_FAR, RGB_DOOR_A, RGB_GOLD, 0
+origInfo    CSBI_EX <>
+themeInfo   CSBI_EX <>
+paletteOK   DWORD 0
+paletteMode DWORD PAL_MODE_NONE
+origOutMode DWORD 0
+classText   BYTE 64 DUP(0)
+pseudoName  BYTE "PseudoConsoleWindow", 0
+ansiOrder   BYTE 0, 4, 2, 6, 1, 5, 3, 7, 8, 12, 10, 14, 9, 13, 11, 15
+hexDigits   BYTE "0123456789abcdef"
+vtTemplate  BYTE 27, "]4;00;rgb:00/00/00", 27, 5Ch
+VT_LEN = ($ - vtTemplate)
+vtBuf       BYTE VT_LEN DUP(0)
+vtReset     BYTE 27, "]104", 27, 5Ch
+VT_RESET_LEN = ($ - vtReset)
+vtWritten   DWORD 0
+tinyRect    SMALL_RECT <0, 0, 0, 0>
+gameRect    SMALL_RECT <0, 0, SCREEN_W - 1, BUF_H - 1>
+gameSize    COORD <SCREEN_W, BUF_H>
+windowOK    DWORD 0
+checkInfo   CSBI_EX <>
 
-; ---------- debug log (DEBUG_LOG = 1) ----------
-logHandle   DWORD 0                         ; file handle of wolf_debug.log (0 = no log)
-logPath     BYTE 260 DUP(0)                 ; full path of the log file
-logName     BYTE "wolf_debug.log", 0        ; log file name (put next to the exe)
-logNumText  BYTE "0000000000", 0            ; 10 digits for LogNum
-logRetText  BYTE " ret=", 0                 ; between call name and return value
-logErrText  BYTE " err=", 0                 ; before GetLastError
-logCrLf     BYTE 13, 10, 0                  ; new line
-logClass    BYTE 64 DUP(0)                  ; console window class name
+logHandle   DWORD 0
+logPath     BYTE 260 DUP(0)
+logName     BYTE "wolf_debug.log", 0
+logNumText  BYTE "0000000000", 0
+logRetText  BYTE " ret=", 0
+logErrText  BYTE " err=", 0
+logCrLf     BYTE 13, 10, 0
+logClass    BYTE 64 DUP(0)
 lgStart     BYTE "WOLF-86 startup log", 13, 10, 0
 lgClass     BYTE "console window class: ", 0
 lgGet       BYTE "GetConsoleScreenBufferInfoEx (start)", 0
@@ -373,154 +341,132 @@ lgPalOK     BYTE "paletteOK (1 = custom table, 0 = fallback table): ", 0
 lgMode      BYTE "paletteMode (0 none, 1 conhost, 2 VT / Windows Terminal): ", 0
 lgWinOK     BYTE "windowOK: ", 0
 
-; ---------- role -> console colour tables (index = role C_SKY .. C_WHITE) ----------
-; The game always draws with roles. roleColors (the active table) turns a
-; role into the real console colour: with the custom palette the role
-; number IS the palette slot; without it, standard colours that keep the
-; blue / orange look are used instead.
-customRoles   BYTE 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 ; custom palette: role = slot
-fallbackRoles BYTE black, lightBlue, lightBlue, blue ; sky/edges, brick 0, brick 1, brick 2
-              BYTE blue, gray, lightGray, lightGray ; brick 3, outline, stone 0, text
-              BYTE lightGray, gray, gray, gray      ; stone 1, stone 2, stone 3, floor near
-              BYTE black, lightRed, yellow, white   ; floor far, door/danger, gold, white
-roleColors    BYTE PAL_SLOTS DUP(?)                 ; the active table (filled by LoadPalette)
-; ---------- the maze: 16 rows x 16 columns, 1 byte per cell ----------
-; '#' = brick wall, '%' = stone wall (same as '#' for movement and rays),
-; '.' = floor, 'E' = exit, 'K' = key. Cell (row, col) is at
-; map + row*16 + col. originalMap is never changed; ResetGame copies it
-; into gameMap, the copy the game plays on (collected keys become '.').
-originalMap BYTE "%%%%%%%%%%%%%%%%"         ; row 0  (outer wall)
-            BYTE "%......#.......%"         ; row 1  (player starts at col 1)
-            BYTE "%.##.#.#.%%%%%.%"         ; row 2
-            BYTE "%.#..#...%..K%.%"         ; row 3  (key at col 12)
-            BYTE "%.#.####.%.#.%.%"         ; row 4
-            BYTE "%...#....%.#...%"         ; row 5
-            BYTE "%%%.#.####.###.%"         ; row 6
-            BYTE "%...#.#....#...%"         ; row 7
-            BYTE "%.###.#.####.#.%"         ; row 8
-            BYTE "%.#...#......#.%"         ; row 9
-            BYTE "%.#.%%%%%%%.##.%"         ; row 10
-            BYTE "%...%.....#..#.%"         ; row 11
-            BYTE "%.###.###.##.#.%"         ; row 12
-            BYTE "%.....#......#.%"         ; row 13
-            BYTE "%K#####K######E%"         ; row 14 (keys at cols 1 and 7, exit at col 14)
-            BYTE "%%%%%%%%%%%%%%%%"         ; row 15 (outer wall)
-gameMap     BYTE MAP_W * MAP_H DUP('#')   ; working copy of the map (filled by ResetGame)
+customRoles   BYTE 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+fallbackRoles BYTE black, lightBlue, lightBlue, blue
+              BYTE blue, gray, lightGray, lightGray
+              BYTE lightGray, gray, gray, gray
+              BYTE black, lightRed, yellow, white
+roleColors    BYTE PAL_SLOTS DUP(?)
+originalMap BYTE "%%%%%%%%%%%%%%%%"
+            BYTE "%......#.......%"
+            BYTE "%.##.#.#.%%%%%.%"
+            BYTE "%.#..#...%..K%.%"
+            BYTE "%.#.####.%.#.%.%"
+            BYTE "%...#....%.#...%"
+            BYTE "%%%.#.####.###.%"
+            BYTE "%...#.#....#...%"
+            BYTE "%.###.#.####.#.%"
+            BYTE "%.#...#......#.%"
+            BYTE "%.#.%%%%%%%.##.%"
+            BYTE "%...%.....#..#.%"
+            BYTE "%.###.###.##.#.%"
+            BYTE "%.....#......#.%"
+            BYTE "%K#####K######E%"
+            BYTE "%%%%%%%%%%%%%%%%"
+gameMap     BYTE MAP_W * MAP_H DUP('#')
 
-; ---------- player data (positions are Q8: value = cells * 256) ----------
-posX      DWORD START_X                     ; X in Q8, set again by ResetGame
-posY      DWORD START_Y                     ; Y in Q8, set again by ResetGame
-angle     DWORD START_ANGLE                 ; facing direction in degrees (0..359), 0 = east
-steps     DWORD 0                           ; number of steps the player has taken
-keys      DWORD 0                           ; keys collected so far (0..3)
-msgText   DWORD 0                           ; address of the HUD message, 0 = no message
-msgColor  DWORD 0                           ; colour of the HUD message
-msgStart  DWORD 0                           ; GetMseconds value when the message started
-startTime DWORD 0                           ; time (ms from GetMseconds) when the game started
+posX      DWORD START_X
+posY      DWORD START_Y
+angle     DWORD START_ANGLE
+steps     DWORD 0
+keys      DWORD 0
+msgText   DWORD 0
+msgColor  DWORD 0
+msgStart  DWORD 0
+startTime DWORD 0
 
-; ---------- game state flags ----------
-showMinimap BYTE 1                          ; 1 = minimap visible, 0 = hidden (M toggles)
-quitFlag    BYTE 0                          ; becomes 1 when the player presses Q
-wonFlag     BYTE 0                          ; becomes 1 when the player touches the exit
-mWasDown    BYTE 0                          ; 1 if M was held last frame (for single press)
-qWasDown    BYTE 0                          ; 1 if Q was held last frame (for single press)
-inputHandle DWORD ?                         ; console input handle (set by InitInput)
-boxHitX     SDWORD 0                        ; BoxCheck: corner that touched something (X)
-boxHitY     SDWORD 0                        ; BoxCheck: corner that touched something (Y)
-turnHold    DWORD 0                         ; frames A or D has been held (turn acceleration)
-turnRamp    BYTE 2, 2, 2, 3, 3, 3, 4, 4, 4, 5 ; degrees per frame while A/D is held
-blinkOn     DWORD 0                         ; 0 / 1, flips every 500 ms (door, keys, title text)
+showMinimap BYTE 1
+quitFlag    BYTE 0
+wonFlag     BYTE 0
+mWasDown    BYTE 0
+qWasDown    BYTE 0
+inputHandle DWORD ?
+boxHitX     SDWORD 0
+boxHitY     SDWORD 0
+turnHold    DWORD 0
+turnRamp    BYTE 2, 2, 2, 3, 3, 3, 4, 4, 4, 5
+blinkOn     DWORD 0
 
-; ---------- per-column ray results (filled by CastAllRays, used by DrawColumn) ----------
-colAngle    WORD  SCREEN_W DUP(0)           ; ray angle of each column
-colDist     DWORD SCREEN_W DUP(0)           ; fisheye-corrected distance (Q8)
-hitSideCol  BYTE  SCREEN_W DUP(0)           ; 0 = X-side hit, 1 = Y-side hit
-colType     BYTE  SCREEN_W DUP(0)           ; HIT_WALL / HIT_EXIT / HIT_KEY
-hitCellCol  BYTE  SCREEN_W DUP(0)           ; map cell number that was hit
-colWallX    BYTE  SCREEN_W DUP(0)           ; where along the wall (0..255)
-rayCell     DWORD 0                         ; CastRay output: cell number of the hit
-rayWallX    DWORD 0                         ; CastRay output: wallX of the hit
+colAngle    WORD  SCREEN_W DUP(0)
+colDist     DWORD SCREEN_W DUP(0)
+hitSideCol  BYTE  SCREEN_W DUP(0)
+colType     BYTE  SCREEN_W DUP(0)
+hitCellCol  BYTE  SCREEN_W DUP(0)
+colWallX    BYTE  SCREEN_W DUP(0)
+rayCell     DWORD 0
+rayWallX    DWORD 0
 
-; ---------- sine table: sinTable[d] = round(sin(d degrees) * 256) ----------
-sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40   ; 0-9 deg
-         SDWORD   44,  49,  53,  58,  62,  66,  71,  75,  79,  83   ; 10-19 deg
-         SDWORD   88,  92,  96, 100, 104, 108, 112, 116, 120, 124   ; 20-29 deg
-         SDWORD  128, 132, 136, 139, 143, 147, 150, 154, 158, 161   ; 30-39 deg
-         SDWORD  165, 168, 171, 175, 178, 181, 184, 187, 190, 193   ; 40-49 deg
-         SDWORD  196, 199, 202, 204, 207, 210, 212, 215, 217, 219   ; 50-59 deg
-         SDWORD  222, 224, 226, 228, 230, 232, 234, 236, 237, 239   ; 60-69 deg
-         SDWORD  241, 242, 243, 245, 246, 247, 248, 249, 250, 251   ; 70-79 deg
-         SDWORD  252, 253, 254, 254, 255, 255, 255, 256, 256, 256   ; 80-89 deg
-         SDWORD  256, 256, 256, 256, 255, 255, 255, 254, 254, 253   ; 90-99 deg
-         SDWORD  252, 251, 250, 249, 248, 247, 246, 245, 243, 242   ; 100-109 deg
-         SDWORD  241, 239, 237, 236, 234, 232, 230, 228, 226, 224   ; 110-119 deg
-         SDWORD  222, 219, 217, 215, 212, 210, 207, 204, 202, 199   ; 120-129 deg
-         SDWORD  196, 193, 190, 187, 184, 181, 178, 175, 171, 168   ; 130-139 deg
-         SDWORD  165, 161, 158, 154, 150, 147, 143, 139, 136, 132   ; 140-149 deg
-         SDWORD  128, 124, 120, 116, 112, 108, 104, 100,  96,  92   ; 150-159 deg
-         SDWORD   88,  83,  79,  75,  71,  66,  62,  58,  53,  49   ; 160-169 deg
-         SDWORD   44,  40,  36,  31,  27,  22,  18,  13,   9,   4   ; 170-179 deg
-         SDWORD    0,  -4,  -9, -13, -18, -22, -27, -31, -36, -40   ; 180-189 deg
-         SDWORD  -44, -49, -53, -58, -62, -66, -71, -75, -79, -83   ; 190-199 deg
-         SDWORD  -88, -92, -96,-100,-104,-108,-112,-116,-120,-124   ; 200-209 deg
-         SDWORD -128,-132,-136,-139,-143,-147,-150,-154,-158,-161   ; 210-219 deg
-         SDWORD -165,-168,-171,-175,-178,-181,-184,-187,-190,-193   ; 220-229 deg
-         SDWORD -196,-199,-202,-204,-207,-210,-212,-215,-217,-219   ; 230-239 deg
-         SDWORD -222,-224,-226,-228,-230,-232,-234,-236,-237,-239   ; 240-249 deg
-         SDWORD -241,-242,-243,-245,-246,-247,-248,-249,-250,-251   ; 250-259 deg
-         SDWORD -252,-253,-254,-254,-255,-255,-255,-256,-256,-256   ; 260-269 deg
-         SDWORD -256,-256,-256,-256,-255,-255,-255,-254,-254,-253   ; 270-279 deg
-         SDWORD -252,-251,-250,-249,-248,-247,-246,-245,-243,-242   ; 280-289 deg
-         SDWORD -241,-239,-237,-236,-234,-232,-230,-228,-226,-224   ; 290-299 deg
-         SDWORD -222,-219,-217,-215,-212,-210,-207,-204,-202,-199   ; 300-309 deg
-         SDWORD -196,-193,-190,-187,-184,-181,-178,-175,-171,-168   ; 310-319 deg
-         SDWORD -165,-161,-158,-154,-150,-147,-143,-139,-136,-132   ; 320-329 deg
-         SDWORD -128,-124,-120,-116,-112,-108,-104,-100, -96, -92   ; 330-339 deg
-         SDWORD  -88, -83, -79, -75, -71, -66, -62, -58, -53, -49   ; 340-349 deg
-         SDWORD  -44, -40, -36, -31, -27, -22, -18, -13,  -9,  -4   ; 350-359 deg
+sinTable SDWORD    0,   4,   9,  13,  18,  22,  27,  31,  36,  40
+         SDWORD   44,  49,  53,  58,  62,  66,  71,  75,  79,  83
+         SDWORD   88,  92,  96, 100, 104, 108, 112, 116, 120, 124
+         SDWORD  128, 132, 136, 139, 143, 147, 150, 154, 158, 161
+         SDWORD  165, 168, 171, 175, 178, 181, 184, 187, 190, 193
+         SDWORD  196, 199, 202, 204, 207, 210, 212, 215, 217, 219
+         SDWORD  222, 224, 226, 228, 230, 232, 234, 236, 237, 239
+         SDWORD  241, 242, 243, 245, 246, 247, 248, 249, 250, 251
+         SDWORD  252, 253, 254, 254, 255, 255, 255, 256, 256, 256
+         SDWORD  256, 256, 256, 256, 255, 255, 255, 254, 254, 253
+         SDWORD  252, 251, 250, 249, 248, 247, 246, 245, 243, 242
+         SDWORD  241, 239, 237, 236, 234, 232, 230, 228, 226, 224
+         SDWORD  222, 219, 217, 215, 212, 210, 207, 204, 202, 199
+         SDWORD  196, 193, 190, 187, 184, 181, 178, 175, 171, 168
+         SDWORD  165, 161, 158, 154, 150, 147, 143, 139, 136, 132
+         SDWORD  128, 124, 120, 116, 112, 108, 104, 100,  96,  92
+         SDWORD   88,  83,  79,  75,  71,  66,  62,  58,  53,  49
+         SDWORD   44,  40,  36,  31,  27,  22,  18,  13,   9,   4
+         SDWORD    0,  -4,  -9, -13, -18, -22, -27, -31, -36, -40
+         SDWORD  -44, -49, -53, -58, -62, -66, -71, -75, -79, -83
+         SDWORD  -88, -92, -96,-100,-104,-108,-112,-116,-120,-124
+         SDWORD -128,-132,-136,-139,-143,-147,-150,-154,-158,-161
+         SDWORD -165,-168,-171,-175,-178,-181,-184,-187,-190,-193
+         SDWORD -196,-199,-202,-204,-207,-210,-212,-215,-217,-219
+         SDWORD -222,-224,-226,-228,-230,-232,-234,-236,-237,-239
+         SDWORD -241,-242,-243,-245,-246,-247,-248,-249,-250,-251
+         SDWORD -252,-253,-254,-254,-255,-255,-255,-256,-256,-256
+         SDWORD -256,-256,-256,-256,-255,-255,-255,-254,-254,-253
+         SDWORD -252,-251,-250,-249,-248,-247,-246,-245,-243,-242
+         SDWORD -241,-239,-237,-236,-234,-232,-230,-228,-226,-224
+         SDWORD -222,-219,-217,-215,-212,-210,-207,-204,-202,-199
+         SDWORD -196,-193,-190,-187,-184,-181,-178,-175,-171,-168
+         SDWORD -165,-161,-158,-154,-150,-147,-143,-139,-136,-132
+         SDWORD -128,-124,-120,-116,-112,-108,-104,-100, -96, -92
+         SDWORD  -88, -83, -79, -75, -71, -66, -62, -58, -53, -49
+         SDWORD  -44, -40, -36, -31, -27, -22, -18, -13,  -9,  -4
 
-; ---------- shading data ----------
-; wall distance limits in Q8 (256 = 1 cell): closer than shadeDist1 = level 0, etc.
-shadeDist1  DWORD 512                       ; under 2 cells  -> level 0 (darkest/solid)
-shadeDist2  DWORD 1024                      ; under 4 cells  -> level 1
-shadeDist3  DWORD 2048                      ; under 8 cells  -> level 2, else level 3
-brickColors BYTE C_BRICK_0, C_BRICK_1, C_BRICK_2, C_BRICK_3, C_OUTLINE, C_OUTLINE ; brick shades near->far, then darker for mortar
-stoneColors BYTE C_STONE_0, C_STONE_1, C_STONE_2, C_STONE_3, C_OUTLINE, C_OUTLINE ; stone shades near->far, then darker for seams
+shadeDist1  DWORD 512
+shadeDist2  DWORD 1024
+shadeDist3  DWORD 2048
+brickColors BYTE C_BRICK_0, C_BRICK_1, C_BRICK_2, C_BRICK_3, C_OUTLINE, C_OUTLINE
+stoneColors BYTE C_STONE_0, C_STONE_1, C_STONE_2, C_STONE_3, C_OUTLINE, C_OUTLINE
 
-; ---------- screen drawing data ----------
-frameBuffer   BYTE SCREEN_W * BUF_H DUP(0)  ; text overlay (HUD, minimap): cell (row,col) at row*SCREEN_W + col, 0 = no text
-attrBuffer    WORD SCREEN_W * BUF_H DUP(DEFAULT_ATTR) ; colour role of each text cell, same layout (2 bytes each)
-pixBuf        BYTE PIX_W * PIX_H DUP(0)     ; 3D view pixels, one colour role each: pixel (y,x) at y*PIX_W + x
-charBuf       DWORD SCREEN_W * BUF_H DUP(0) ; CHAR_INFO cells for WriteConsoleOutput (char low word, colour high word)
-writeRect     SMALL_RECT <>                 ; area WriteConsoleOutput draws (set every frame)
-consoleHandle DWORD ?                       ; handle of the console output (set by HideCursor)
-cursorInfo    CONSOLE_CURSOR_INFO <100, 0>  ; cursor size 100%, bVisible = 0 (hidden)
-drawPos       COORD <0, 0>                  ; screen position (0,0) where drawing starts
+frameBuffer   BYTE SCREEN_W * BUF_H DUP(0)
+attrBuffer    WORD SCREEN_W * BUF_H DUP(DEFAULT_ATTR)
+pixBuf        BYTE PIX_W * PIX_H DUP(0)
+charBuf       DWORD SCREEN_W * BUF_H DUP(0)
+writeRect     SMALL_RECT <>
+consoleHandle DWORD ?
+cursorInfo    CONSOLE_CURSOR_INFO <100, 0>
+drawPos       COORD <0, 0>
 
-; ---------- title screen ----------
-; ---------- WOLF-86 in block letters ('#' is printed as a solid block) ----------
 logoArt BYTE "#   #  ###  #     #####        ###   ### ", 0
         BYTE "#   # #   # #     #           #   # #    ", 0
         BYTE "# # # #   # #     ####   ###   ###  #### ", 0
         BYTE "## ## #   # #     #           #   # #   #", 0
         BYTE "#   #  ###  ##### #            ###   ### ", 0
-; ---------- ESCAPED! in block letters ('#' is printed as a solid block) ----------
 winArt BYTE "#####  ####  ####  ###  ####  ##### ####    #  ", 0
        BYTE "#     #     #     #   # #   # #     #   #   #  ", 0
        BYTE "####   ###  #     ##### ####  ####  #   #   #  ", 0
        BYTE "#         # #     #   # #     #     #   #      ", 0
        BYTE "##### ####   #### #   # #     ##### ####    #  ", 0
-; ---------- TIME UP in block letters ('#' is printed as a solid block) ----------
 loseArt BYTE "##### ##### #   # #####       #   # #### ", 0
         BYTE "  #     #   ## ## #           #   # #   #", 0
         BYTE "  #     #   # # # ####        #   # #### ", 0
         BYTE "  #     #   #   # #           #   # #    ", 0
         BYTE "  #   ##### #   # #####        ###  #    ", 0
-logoColors BYTE C_WALL_0, C_WALL_0, C_WALL_1, C_WALL_2, C_WALL_3 ; logo: light blue (top) to deep blue (bottom)
-winColors  BYTE 5 DUP(C_GOLD)                              ; win banner: gold
-loseColors BYTE 5 DUP(C_DANGER)                            ; lose banner: danger red
-subText    BYTE "A 3D RAYCASTING MAZE GAME IN x86 ASSEMBLY", 0 ; line under the logo
-; ---------- controls box (code page 437 double-line box) ----------
+logoColors BYTE C_WALL_0, C_WALL_0, C_WALL_1, C_WALL_2, C_WALL_3
+winColors  BYTE 5 DUP(C_GOLD)
+loseColors BYTE 5 DUP(C_DANGER)
+subText    BYTE "A 3D RAYCASTING MAZE GAME IN x86 ASSEMBLY", 0
 ctrlBox BYTE 201, 44 DUP(205), 187, 0
         BYTE 186, "  CONTROLS                                  ", 186, 0
         BYTE 186, "  W / S   move forward / back               ", 186, 0
@@ -531,2606 +477,1910 @@ ctrlBox BYTE 201, 44 DUP(205), 187, 0
         BYTE 186, "  GOAL: find the 3 keys (K), then reach the ", 186, 0
         BYTE 186, "        exit (E) before the timer runs out! ", 186, 0
         BYTE 200, 44 DUP(205), 188, 0
-boxColors  BYTE C_MAP_WALL, 8 DUP(C_WHITE), C_MAP_WALL     ; box border slot 9, text white
-pressKey   BYTE "PRESS ANY KEY", 0                         ; blinking prompt
+boxColors  BYTE C_MAP_WALL, 8 DUP(C_WHITE), C_MAP_WALL
+pressKey   BYTE "PRESS ANY KEY", 0
 
-; ---------- HUD text (numbers are filled in each frame) ----------
 hudTemplate BYTE "TIME 00:00  STEPS 00000  KEYS 0/3  W/S move  A/D turn  M map  Q quit"
-HUD_LEN = ($ - hudTemplate)                 ; number of characters in the template
-keyMsg     BYTE "KEY FOUND! 0/3", 0                    ; the 0 is replaced by the key count
-lockedMsg  BYTE "DOOR LOCKED - FIND 3 KEYS", 0         ; shown when touching the door too early
+HUD_LEN = ($ - hudTemplate)
+keyMsg     BYTE "KEY FOUND! 0/3", 0
+lockedMsg  BYTE "DOOR LOCKED - FIND 3 KEYS", 0
 
-; ---------- end screen text ----------
-loseText   BYTE "You did not escape in time.", 0          ; lose message
-timeMsg    BYTE "Time taken: ", 0                         ; label before mm:ss
-stepsMsg   BYTE "Steps:      ", 0                         ; label before the step count
-keysMsg    BYTE "Keys:       ", 0                         ; label before the key count
-keysOf     BYTE "/3", 0                                   ; after the key count
-againMsg   BYTE "Play again? (Y/N)", 0                    ; question on both screens
+loseText   BYTE "You did not escape in time.", 0
+timeMsg    BYTE "Time taken: ", 0
+stepsMsg   BYTE "Steps:      ", 0
+keysMsg    BYTE "Keys:       ", 0
+keysOf     BYTE "/3", 0
+againMsg   BYTE "Play again? (Y/N)", 0
 
 .code
-;-------------------------------------------------------------
-; main
-; Purpose:   Program entry. Title screen, then play games
-;            until the player quits (Q) or says N to
-;            "Play again?".
-; Receives:  nothing
-; Returns:   nothing (ends the program)
-; Registers: none kept (program ends)
-;-------------------------------------------------------------
+
+; Program entry: setup, title screen, game loop, win/lose, play again
 main PROC
-    INVOKE SetConsoleOutputCP, CODE_PAGE_437 ; show bytes 176..219 as block characters
-    INVOKE HideCursor                       ; get console handle and hide the cursor
+    INVOKE SetConsoleOutputCP, CODE_PAGE_437
+    INVOKE HideCursor
 IF DEBUG_LOG
-    INVOKE OpenLog                          ; debug: start wolf_debug.log
+    INVOKE OpenLog
 ENDIF
-    INVOKE SetupWindow                      ; FIRST: window and buffer = SCREEN_W x BUF_H
-    INVOKE LoadPalette                      ; THEN: blue/orange theme (standard colours if it fails)
+    INVOKE SetupWindow
+    INVOKE LoadPalette
 IF DEBUG_LOG
-    INVOKE CloseLog                         ; debug: finish wolf_debug.log
+    INVOKE CloseLog
 ENDIF
-    INVOKE InitInput                        ; get console input handle (for flushing keys)
-    INVOKE TitleScreen                      ; show the title screen, EAX = key pressed
-    and    al, 11011111b                    ; make the key uppercase
-    cmp    al, 'Q'                          ; Q on the title screen?
-    je     QuitProgram                      ; yes: quit straight away
+    INVOKE InitInput
+    INVOKE TitleScreen
+    and    al, 11011111b
+    cmp    al, 'Q'
+    je     QuitProgram
 NewGame:
-    INVOKE WaitKeysReleased                 ; the last key pressed can't trigger M or Q
-    INVOKE ResetGame                        ; start position, angle, steps, timer
-    mov    eax, DEFAULT_ATTR                ; normal colours (win/lose screens used gold/red)
-    call   SetRoleColor                    ; Clrscr paints every cell with this colour
-    call   Clrscr                           ; clean screen for the game
-    INVOKE GameLoop                         ; play; EAX = how the game ended
-    cmp    eax, RESULT_QUIT                 ; pressed Q?
-    je     QuitProgram                      ; yes: end the program
-    cmp    eax, RESULT_WIN                  ; reached the exit?
-    jne    PlayerLost                       ; no: time ran out
-    INVOKE WinScreen                        ; show the win screen
-    jmp    AskAgain                         ; then ask about another game
+    INVOKE WaitKeysReleased
+    INVOKE ResetGame
+    mov    eax, DEFAULT_ATTR
+    call   SetRoleColor
+    call   Clrscr
+    INVOKE GameLoop
+    cmp    eax, RESULT_QUIT
+    je     QuitProgram
+    cmp    eax, RESULT_WIN
+    jne    PlayerLost
+    INVOKE WinScreen
+    jmp    AskAgain
 PlayerLost:
-    INVOKE LoseScreen                       ; show the lose screen
+    INVOKE LoseScreen
 AskAgain:
-    INVOKE AskPlayAgain                     ; EAX = 1 for Y, 0 for N/Q
-    cmp    eax, 1                           ; play again?
-    je     NewGame                          ; yes: start a new game
+    INVOKE AskPlayAgain
+    cmp    eax, 1
+    je     NewGame
 QuitProgram:
-    mov    eax, DEFAULT_ATTR                ; normal colours for the console we leave behind
-    call   SetRoleColor                    ; apply them
-    INVOKE RestorePalette                   ; give the console its own colours back
-    call   Clrscr                           ; leave a clean console behind
-    INVOKE ExitProcess, 0                   ; end the program with exit code 0
+    mov    eax, DEFAULT_ATTR
+    call   SetRoleColor
+    INVOKE RestorePalette
+    call   Clrscr
+    INVOKE ExitProcess, 0
 main ENDP
 
-;-------------------------------------------------------------
-; GetSin
-; Purpose:   Look up sin(angle) in the table.
-; Receives:  EAX = angle in degrees (0..359)
-; Returns:   EAX = sin(angle) * 256 (signed, -256..256)
-; Registers: EAX only
-;-------------------------------------------------------------
+; sin(angle) * 256 from the lookup table
 GetSin PROC
-    mov  eax, sinTable[eax*4]               ; each entry is 4 bytes, so index = angle*4
-    ret                                     ; return with the value in EAX
+    mov  eax, sinTable[eax*4]
+    ret
 GetSin ENDP
 
-;-------------------------------------------------------------
-; GetCos
-; Purpose:   Find cos(angle) using cos(a) = sin(a + 90).
-; Receives:  EAX = angle in degrees (0..359)
-; Returns:   EAX = cos(angle) * 256 (signed, -256..256)
-; Registers: EAX only
-;-------------------------------------------------------------
+; cos(angle) * 256 using cos(a) = sin(a + 90)
 GetCos PROC
-    add  eax, 90                            ; shift the angle by 90 degrees
-    cmp  eax, 360                           ; did it go past 359?
-    jb   AngleOK                            ; no: angle is already 0..359
-    sub  eax, 360                           ; yes: wrap it back around (mod 360)
+    add  eax, 90
+    cmp  eax, 360
+    jb   AngleOK
+    sub  eax, 360
 AngleOK:
-    call GetSin                             ; EAX = sin(angle + 90) = cos(angle)
-    ret                                     ; return with the value in EAX
+    call GetSin
+    ret
 GetCos ENDP
 
-;-------------------------------------------------------------
-; TitleScreen
-; Purpose:   Clear the screen and show the block-letter logo,
-;            a subtitle and the controls box, then blink
-;            "PRESS ANY KEY" until a key is pressed (ReadKey
-;            does not wait, so the loop keeps blinking).
-; Receives:  nothing
-; Returns:   EAX = the key that was pressed (in AL)
-; Registers: EAX (EDX saved by USES)
-;-------------------------------------------------------------
+; Title screen: logo, controls box, blinking PRESS ANY KEY
 TitleScreen PROC USES edx
-    call Clrscr                             ; clear the console
-    INVOKE PrintArt, ADDR logoArt, ADDR logoColors, ART_LINES, LOGO_ROW, LOGO_COL ; big logo
-    mov  eax, C_DOOR_B                      ; subtitle colour: orange accent
-    call SetRoleColor                      ; apply it
-    mov  dh, SUB_ROW                        ; row of the subtitle
-    mov  dl, SUB_COL                        ; column of the subtitle
-    call Gotoxy                             ; move the cursor there
-    mov  edx, OFFSET subText                ; subtitle text
-    call WriteString                        ; print it
-    INVOKE PrintArt, ADDR ctrlBox, ADDR boxColors, BOX_LINES, BOX_ROW, BOX_COL ; controls box
+    call Clrscr
+    INVOKE PrintArt, ADDR logoArt, ADDR logoColors, ART_LINES, LOGO_ROW, LOGO_COL
+    mov  eax, C_DOOR_B
+    call SetRoleColor
+    mov  dh, SUB_ROW
+    mov  dl, SUB_COL
+    call Gotoxy
+    mov  edx, OFFSET subText
+    call WriteString
+    INVOKE PrintArt, ADDR ctrlBox, ADDR boxColors, BOX_LINES, BOX_ROW, BOX_COL
 TitleWait:
-    call UpdateBlink                        ; blinkOn = 0 or 1 from the clock
-    mov  eax, C_DOOR_B                      ; bright prompt: orange accent
-    cmp  blinkOn, 0                         ; first half of the blink?
-    je   PromptColor                        ; yes: keep orange
-    mov  eax, C_FLOOR_NEAR                  ; no: dim
+    call UpdateBlink
+    mov  eax, C_DOOR_B
+    cmp  blinkOn, 0
+    je   PromptColor
+    mov  eax, C_FLOOR_NEAR
 PromptColor:
-    call SetRoleColor                      ; apply the prompt colour
-    mov  dh, PRESS_ROW                      ; row of the prompt
-    mov  dl, PRESS_COL                      ; column of the prompt
-    call Gotoxy                             ; move the cursor there
-    mov  edx, OFFSET pressKey               ; "PRESS ANY KEY"
-    call WriteString                        ; print it in this frame's colour
-    mov  eax, TITLE_DELAY                   ; 50 ms
-    call Delay                              ; short wait so the CPU is not busy
-    call ReadKey                            ; key waiting? (does not wait) ZF = 1 if none
-    jz   TitleWait                          ; no key: keep blinking
-    movzx eax, al                           ; EAX = just the key code
-    push eax                                ; keep the key
-    mov  eax, DEFAULT_ATTR                  ; back to normal colours
-    call SetRoleColor                      ; apply them
-    pop  eax                                ; EAX = key again
-    ret                                     ; back to caller
+    call SetRoleColor
+    mov  dh, PRESS_ROW
+    mov  dl, PRESS_COL
+    call Gotoxy
+    mov  edx, OFFSET pressKey
+    call WriteString
+    mov  eax, TITLE_DELAY
+    call Delay
+    call ReadKey
+    jz   TitleWait
+    movzx eax, al
+    push eax
+    mov  eax, DEFAULT_ATTR
+    call SetRoleColor
+    pop  eax
+    ret
 TitleScreen ENDP
 
-;-------------------------------------------------------------
-; PrintArt
-; Purpose:   Print several 0-terminated text lines, one under
-;            the other, starting at (row, col). Each line has
-;            its own colour. A '#' is printed as a solid block
-;            (219), so block letters can be typed with '#'.
-; Receives:  artPtr   = address of the first line
-;            colorPtr = address of one colour byte per line
-;            lines    = number of lines
-;            row, col = screen position of the first line
-; Returns:   nothing (console changed)
-; Registers: none (EAX, ECX, EDX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Print coloured text/block-art lines at (row, col)
 PrintArt PROC USES eax ecx edx esi edi, artPtr:PTR BYTE, colorPtr:PTR BYTE, lines:DWORD, row:DWORD, col:DWORD
-    mov  esi, artPtr                        ; ESI = next character to print
-    mov  edi, colorPtr                      ; EDI = colour of the current line
-    mov  ecx, lines                         ; ECX = lines left
+    mov  esi, artPtr
+    mov  edi, colorPtr
+    mov  ecx, lines
 ArtLine:
-    movzx eax, BYTE PTR [edi]               ; EAX = colour of this line
-    call SetRoleColor                      ; apply it
-    inc  edi                                ; next line's colour
-    mov  eax, row                           ; EAX = row of this line
-    mov  dh, al                             ; DH = row
-    mov  eax, col                           ; EAX = column
-    mov  dl, al                             ; DL = column
-    call Gotoxy                             ; move the cursor to the line start
+    movzx eax, BYTE PTR [edi]
+    call SetRoleColor
+    inc  edi
+    mov  eax, row
+    mov  dh, al
+    mov  eax, col
+    mov  dl, al
+    call Gotoxy
 ArtChar:
-    mov  al, [esi]                          ; AL = next character
-    inc  esi                                ; move past it
-    cmp  al, 0                              ; end of this line?
-    je   ArtLineDone                        ; yes
-    cmp  al, '#'                            ; block-letter marker?
-    jne  ArtPut                             ; no: print as it is
-    mov  al, WALL_CHAR                      ; yes: print a solid block instead
+    mov  al, [esi]
+    inc  esi
+    cmp  al, 0
+    je   ArtLineDone
+    cmp  al, '#'
+    jne  ArtPut
+    mov  al, WALL_CHAR
 ArtPut:
-    call WriteChar                          ; print the character
-    jmp  ArtChar                            ; next character
+    call WriteChar
+    jmp  ArtChar
 ArtLineDone:
-    inc  row                                ; next line goes one row lower
-    loop ArtLine                            ; ECX--, repeat for every line
-    ret                                     ; back to caller
+    inc  row
+    loop ArtLine
+    ret
 PrintArt ENDP
 
-;-------------------------------------------------------------
-; ClearBuffer
-; Purpose:   Empty the text overlay: frameBuffer = 0 (no text,
-;            the pixels show through) and attrBuffer = the
-;            normal colour.
-; Receives:  nothing
-; Returns:   nothing
-; Registers: none (EAX, ECX, EDI saved by USES)
-;-------------------------------------------------------------
+; Clear the text overlay (frameBuffer, attrBuffer)
 ClearBuffer PROC USES eax ecx edi
-    cld                                     ; direction flag = 0, so EDI moves forward
-    mov  al, 0                              ; AL = the byte to store (0 = no text)
-    mov  ecx, SCREEN_W * BUF_H              ; ECX = how many bytes (one per cell)
-    mov  edi, OFFSET frameBuffer            ; EDI = start of the buffer
-    rep  stosb                              ; store AL at [EDI], EDI++, repeat ECX times
-    mov  ax, DEFAULT_ATTR                   ; AX = the word to store (normal colour)
-    mov  ecx, SCREEN_W * BUF_H              ; ECX = how many words (one per cell)
-    mov  edi, OFFSET attrBuffer             ; EDI = start of the colour buffer
-    rep  stosw                              ; store AX at [EDI], EDI += 2, repeat ECX times
-    ret                                     ; back to caller
+    cld
+    mov  al, 0
+    mov  ecx, SCREEN_W * BUF_H
+    mov  edi, OFFSET frameBuffer
+    rep  stosb
+    mov  ax, DEFAULT_ATTR
+    mov  ecx, SCREEN_W * BUF_H
+    mov  edi, OFFSET attrBuffer
+    rep  stosw
+    ret
 ClearBuffer ENDP
 
-;-------------------------------------------------------------
-; HideCursor
-; Purpose:   Get the console output handle (saved in
-;            consoleHandle) and hide the blinking cursor.
-;            Must be called once before DrawBuffer.
-; Receives:  nothing
-; Returns:   consoleHandle is set
-; Registers: none (EAX, ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Get the console handle and hide the cursor
 HideCursor PROC USES eax ecx edx
-    INVOKE GetStdHandle, STD_OUTPUT_HANDLE  ; ask Windows for the console output handle
-    mov  consoleHandle, eax                 ; save it for later drawing
-    INVOKE SetConsoleCursorInfo, consoleHandle, ADDR cursorInfo ; bVisible = 0 hides the cursor
-    ret                                     ; back to caller
+    INVOKE GetStdHandle, STD_OUTPUT_HANDLE
+    mov  consoleHandle, eax
+    INVOKE SetConsoleCursorInfo, consoleHandle, ADDR cursorInfo
+    ret
 HideCursor ENDP
 
-;-------------------------------------------------------------
-; SetupWindow
-; Purpose:   Make the console buffer and window exactly the game
-;            size (SCREEN_W x BUF_H), so no empty area is left:
-;            1. shrink the window to 1x1 (a buffer can never be
-;               smaller than its window),
-;            2. set the buffer size,
-;            3. set the window to the full buffer.
-;            Then remove the maximize button and the resizable
-;            border. If a call fails the game keeps running in
-;            whatever size the console has.
-; Receives:  nothing (consoleHandle must be set)
-; Returns:   windowOK = 1 on success
-; Registers: none (EAX, EBX saved by USES)
-;-------------------------------------------------------------
+; Resize the console buffer and window to the game size
 SetupWindow PROC USES eax ebx ecx
-    INVOKE SetConsoleWindowInfo, consoleHandle, 1, ADDR tinyRect ; step 1: tiny window
+    INVOKE SetConsoleWindowInfo, consoleHandle, 1, ADDR tinyRect
 IF DEBUG_LOG
-    mov  ecx, eax                           ; ECX = result
-    INVOKE GetLastError                     ; EAX = error code
-    INVOKE LogCall, ADDR lgWinTiny, ecx, eax ; log it
+    mov  ecx, eax
+    INVOKE GetLastError
+    INVOKE LogCall, ADDR lgWinTiny, ecx, eax
 ENDIF
-    INVOKE SetConsoleScreenBufferSize, consoleHandle, gameSize   ; step 2: buffer = game size
+    INVOKE SetConsoleScreenBufferSize, consoleHandle, gameSize
 IF DEBUG_LOG
-    push eax                                ; keep the result
-    mov  ecx, eax                           ; ECX = result
-    INVOKE GetLastError                     ; EAX = error code
-    INVOKE LogCall, ADDR lgBufSize, ecx, eax ; log it
-    pop  eax                                ; result again
+    push eax
+    mov  ecx, eax
+    INVOKE GetLastError
+    INVOKE LogCall, ADDR lgBufSize, ecx, eax
+    pop  eax
 ENDIF
-    cmp  eax, 0                             ; did it fail?
-    je   WindowDone                         ; yes: keep the console as it is
-    INVOKE SetConsoleWindowInfo, consoleHandle, 1, ADDR gameRect ; step 3: window = buffer
+    cmp  eax, 0
+    je   WindowDone
+    INVOKE SetConsoleWindowInfo, consoleHandle, 1, ADDR gameRect
 IF DEBUG_LOG
-    push eax                                ; keep the result
-    mov  ecx, eax                           ; ECX = result
-    INVOKE GetLastError                     ; EAX = error code
-    INVOKE LogCall, ADDR lgWinGame, ecx, eax ; log it
-    pop  eax                                ; result again
+    push eax
+    mov  ecx, eax
+    INVOKE GetLastError
+    INVOKE LogCall, ADDR lgWinGame, ecx, eax
+    pop  eax
 ENDIF
-    cmp  eax, 0                             ; did it fail?
-    je   WindowDone                         ; yes: keep running
-    mov  windowOK, 1                        ; the window now fits the game exactly
-    INVOKE GetConsoleWindow                 ; EAX = window handle (0 in some terminals)
-    cmp  eax, 0                             ; no real window?
-    je   WindowDone                         ; then leave the style alone
-    mov  ebx, eax                           ; EBX = window handle
-    INVOKE GetWindowLongA, ebx, GWL_STYLE   ; EAX = current window style
-    and  eax, NOT (WS_MAXIMIZEBOX OR WS_SIZEBOX) ; clear the maximize and resize bits
-    INVOKE SetWindowLongA, ebx, GWL_STYLE, eax   ; apply the new style
+    cmp  eax, 0
+    je   WindowDone
+    mov  windowOK, 1
+    INVOKE GetConsoleWindow
+    cmp  eax, 0
+    je   WindowDone
+    mov  ebx, eax
+    INVOKE GetWindowLongA, ebx, GWL_STYLE
+    and  eax, NOT (WS_MAXIMIZEBOX OR WS_SIZEBOX)
+    INVOKE SetWindowLongA, ebx, GWL_STYLE, eax
 WindowDone:
 IF DEBUG_LOG
-    mov  checkInfo.cbSize, SIZEOF CSBI_EX   ; read the settings again
-    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR checkInfo ; after the resize
-    mov  ecx, eax                           ; ECX = result
-    INVOKE GetLastError                     ; EAX = error code
-    INVOKE LogCall, ADDR lgAfter, ecx, eax  ; log it
-    INVOKE LogInfo, ADDR checkInfo          ; size, window, colours now
-    INVOKE LogNum, ADDR lgWinOK, windowOK   ; did the resize work?
+    mov  checkInfo.cbSize, SIZEOF CSBI_EX
+    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR checkInfo
+    mov  ecx, eax
+    INVOKE GetLastError
+    INVOKE LogCall, ADDR lgAfter, ecx, eax
+    INVOKE LogInfo, ADDR checkInfo
+    INVOKE LogNum, ADDR lgWinOK, windowOK
 ENDIF
-    ret                                     ; back to caller
+    ret
 SetupWindow ENDP
 
 IF DEBUG_LOG
-;-------------------------------------------------------------
-; OpenLog  (debug only, DEBUG_LOG = 1)
-; Purpose:   Create wolf_debug.log in the folder of the exe and
-;            write the console window class name (conhost uses
-;            "ConsoleWindowClass", Windows Terminal a pseudo
-;            console window).
-; Receives:  nothing
-; Returns:   logHandle set (0 if the file could not be made)
-; Registers: none (EAX, ECX, EDX, EDI saved by USES)
-;-------------------------------------------------------------
+
+; Debug: create wolf_debug.log
 OpenLog PROC USES eax ecx edx edi
-    INVOKE GetModuleFileNameA, 0, ADDR logPath, 200 ; full path of the exe
-    mov  edi, OFFSET logPath                ; EDI = start of the path
-    add  edi, eax                           ; EDI = end of the path
+    INVOKE GetModuleFileNameA, 0, ADDR logPath, 200
+    mov  edi, OFFSET logPath
+    add  edi, eax
 FindSlash:
-    cmp  edi, OFFSET logPath                ; back at the start?
-    je   PathReady                          ; yes: no folder part
-    dec  edi                                ; one character back
-    cmp  BYTE PTR [edi], '\'                ; folder separator?
-    jne  FindSlash                          ; no: keep looking
-    inc  edi                                ; the file name starts after it
+    cmp  edi, OFFSET logPath
+    je   PathReady
+    dec  edi
+    cmp  BYTE PTR [edi], '\'
+    jne  FindSlash
+    inc  edi
 PathReady:
-    INVOKE Str_copy, ADDR logName, edi      ; replace the exe name with the log name
-    mov  edx, OFFSET logPath                ; EDX = file name for Irvine
-    call CreateOutputFile                   ; EAX = file handle
-    cmp  eax, INVALID_HANDLE_VALUE          ; failed?
-    je   OpenDone                           ; yes: no log
-    mov  logHandle, eax                     ; keep the handle
-    INVOKE LogText, ADDR lgStart            ; heading
-    INVOKE GetConsoleWindow                 ; EAX = console window
-    INVOKE GetClassNameA, eax, ADDR logClass, 63 ; its class name
-    INVOKE LogText, ADDR lgClass            ; label
-    INVOKE LogText, ADDR logClass           ; class name
-    INVOKE LogText, ADDR logCrLf            ; new line
+    INVOKE Str_copy, ADDR logName, edi
+    mov  edx, OFFSET logPath
+    call CreateOutputFile
+    cmp  eax, INVALID_HANDLE_VALUE
+    je   OpenDone
+    mov  logHandle, eax
+    INVOKE LogText, ADDR lgStart
+    INVOKE GetConsoleWindow
+    INVOKE GetClassNameA, eax, ADDR logClass, 63
+    INVOKE LogText, ADDR lgClass
+    INVOKE LogText, ADDR logClass
+    INVOKE LogText, ADDR logCrLf
 OpenDone:
-    ret                                     ; back to caller
+    ret
 OpenLog ENDP
 
-;-------------------------------------------------------------
-; CloseLog  (debug only)
-; Purpose:   Close wolf_debug.log.
-; Receives:  nothing
-; Returns:   logHandle = 0
-; Registers: none (EAX saved by USES)
-;-------------------------------------------------------------
+; Debug: close the log file
 CloseLog PROC USES eax
-    mov  eax, logHandle                     ; EAX = file handle
-    cmp  eax, 0                             ; no log?
-    je   CloseDone                          ; nothing to close
-    call CloseFile                          ; close it
-    mov  logHandle, 0                       ; no log any more
+    mov  eax, logHandle
+    cmp  eax, 0
+    je   CloseDone
+    call CloseFile
+    mov  logHandle, 0
 CloseDone:
-    ret                                     ; back to caller
+    ret
 CloseLog ENDP
 
-;-------------------------------------------------------------
-; LogText  (debug only)
-; Purpose:   Write a 0-terminated text to the log.
-; Receives:  textPtr = address of the text
-; Returns:   nothing
-; Registers: none (EAX, ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Debug: write a text to the log
 LogText PROC USES eax ecx edx, textPtr:PTR BYTE
-    cmp  logHandle, 0                       ; no log open?
-    je   TextDone                           ; then do nothing
-    INVOKE Str_length, textPtr              ; EAX = number of characters
-    mov  ecx, eax                           ; ECX = count for WriteToFile
-    mov  edx, textPtr                       ; EDX = text
-    mov  eax, logHandle                     ; EAX = file handle
-    call WriteToFile                        ; write it
+    cmp  logHandle, 0
+    je   TextDone
+    INVOKE Str_length, textPtr
+    mov  ecx, eax
+    mov  edx, textPtr
+    mov  eax, logHandle
+    call WriteToFile
 TextDone:
-    ret                                     ; back to caller
+    ret
 LogText ENDP
 
-;-------------------------------------------------------------
-; LogNum  (debug only)
-; Purpose:   Write a label, a 10-digit number and a new line.
-; Receives:  textPtr = label, value = number
-; Returns:   nothing
-; Registers: none
-;-------------------------------------------------------------
+; Debug: write a label and a number to the log
 LogNum PROC, textPtr:PTR BYTE, value:DWORD
-    INVOKE LogText, textPtr                 ; label
-    INVOKE PutNumber, ADDR logNumText, value, 10 ; number as 10 digits
-    INVOKE LogText, ADDR logNumText         ; number
-    INVOKE LogText, ADDR logCrLf            ; new line
-    ret                                     ; back to caller
+    INVOKE LogText, textPtr
+    INVOKE PutNumber, ADDR logNumText, value, 10
+    INVOKE LogText, ADDR logNumText
+    INVOKE LogText, ADDR logCrLf
+    ret
 LogNum ENDP
 
-;-------------------------------------------------------------
-; LogCall  (debug only)
-; Purpose:   Write "name ret=<value> err=<GetLastError>".
-; Receives:  textPtr = call name, retVal, errVal
-; Returns:   nothing
-; Registers: none
-;-------------------------------------------------------------
+; Debug: write a call's return value and error code
 LogCall PROC, textPtr:PTR BYTE, retVal:DWORD, errVal:DWORD
-    INVOKE LogText, textPtr                 ; call name
-    INVOKE LogText, ADDR logRetText         ; " ret="
-    INVOKE PutNumber, ADDR logNumText, retVal, 10 ; return value
-    INVOKE LogText, ADDR logNumText         ; write it
-    INVOKE LogNum, ADDR logErrText, errVal  ; " err=" + error + new line
-    ret                                     ; back to caller
+    INVOKE LogText, textPtr
+    INVOKE LogText, ADDR logRetText
+    INVOKE PutNumber, ADDR logNumText, retVal, 10
+    INVOKE LogText, ADDR logNumText
+    INVOKE LogNum, ADDR logErrText, errVal
+    ret
 LogCall ENDP
 
-;-------------------------------------------------------------
-; LogInfo  (debug only)
-; Purpose:   Write buffer size, window rectangle and the first
-;            three palette colours of a CSBI_EX structure.
-; Receives:  infoPtr = address of the structure
-; Returns:   nothing
-; Registers: none (EAX, EBX saved by USES)
-;-------------------------------------------------------------
+; Debug: write console size, window and colours
 LogInfo PROC USES eax ebx, infoPtr:PTR CSBI_EX
-    mov  ebx, infoPtr                       ; EBX = structure
-    movzx eax, (CSBI_EX PTR [ebx]).dwSize.X ; buffer width
-    INVOKE LogNum, ADDR lgSizeX, eax        ; log it
-    movzx eax, (CSBI_EX PTR [ebx]).dwSize.Y ; buffer height
-    INVOKE LogNum, ADDR lgSizeY, eax        ; log it
-    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Left ; window left
-    INVOKE LogNum, ADDR lgWinL, eax         ; log it
-    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Top ; window top
-    INVOKE LogNum, ADDR lgWinT, eax         ; log it
-    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Right ; window right
-    INVOKE LogNum, ADDR lgWinR, eax         ; log it
-    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Bottom ; window bottom
-    INVOKE LogNum, ADDR lgWinB, eax         ; log it
-    INVOKE LogNum, ADDR lgCol0, (CSBI_EX PTR [ebx]).ColorTable[0] ; colour slot 0
-    INVOKE LogNum, ADDR lgCol1, (CSBI_EX PTR [ebx]).ColorTable[4] ; colour slot 1
-    INVOKE LogNum, ADDR lgCol2, (CSBI_EX PTR [ebx]).ColorTable[8] ; colour slot 2
-    ret                                     ; back to caller
+    mov  ebx, infoPtr
+    movzx eax, (CSBI_EX PTR [ebx]).dwSize.X
+    INVOKE LogNum, ADDR lgSizeX, eax
+    movzx eax, (CSBI_EX PTR [ebx]).dwSize.Y
+    INVOKE LogNum, ADDR lgSizeY, eax
+    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Left
+    INVOKE LogNum, ADDR lgWinL, eax
+    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Top
+    INVOKE LogNum, ADDR lgWinT, eax
+    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Right
+    INVOKE LogNum, ADDR lgWinR, eax
+    movzx eax, (CSBI_EX PTR [ebx]).srWindow.Bottom
+    INVOKE LogNum, ADDR lgWinB, eax
+    INVOKE LogNum, ADDR lgCol0, (CSBI_EX PTR [ebx]).ColorTable[0]
+    INVOKE LogNum, ADDR lgCol1, (CSBI_EX PTR [ebx]).ColorTable[4]
+    INVOKE LogNum, ADDR lgCol2, (CSBI_EX PTR [ebx]).ColorTable[8]
+    ret
 LogInfo ENDP
 ENDIF
 
-;-------------------------------------------------------------
-; LoadPalette
-; Purpose:   Install the blue/orange theme colours, whatever
-;            console the game runs in. Called AFTER SetupWindow.
-;            - Windows Terminal (pseudo console, e.g. F5 from
-;              Visual Studio): it ignores the console colour
-;              table, so the colours are set with VT escape
-;              sequences (SetPaletteVT).
-;            - Classic console (conhost): read the settings
-;              fresh, change only the colour table, apply it and
-;              read it back (TryConhostPalette); one retry.
-;            If nothing works, the standard colours are used
-;            (fallbackRoles). The Set call can show the cursor
-;            again, so it is hidden once more at the end.
-; Receives:  nothing (consoleHandle must be set)
-; Returns:   paletteOK, paletteMode, roleColors set
-; Registers: none (EAX, ECX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Install the blue/orange colour theme (or use the fallback colours)
 LoadPalette PROC USES eax ecx esi edi
-IF FORCE_FALLBACK                           ; debug build: skip the palette completely
-    jmp  PaletteDone                        ; paletteOK stays 0 -> standard colours
+IF FORCE_FALLBACK
+    jmp  PaletteDone
 ENDIF
-    call IsPseudoConsole                    ; EAX = 1 in Windows Terminal
-    cmp  eax, 0                             ; classic console?
-    je   ConhostPalette                     ; yes
-    call SetPaletteVT                       ; Windows Terminal: VT colour sequences
-    cmp  eax, 0                             ; did it work?
-    je   PaletteDone                        ; no: standard colours
-    mov  paletteMode, PAL_MODE_VT           ; remember how to undo it
-    mov  paletteOK, 1                       ; custom colours are active
-    jmp  PaletteDone                        ; finished
+    call IsPseudoConsole
+    cmp  eax, 0
+    je   ConhostPalette
+    call SetPaletteVT
+    cmp  eax, 0
+    je   PaletteDone
+    mov  paletteMode, PAL_MODE_VT
+    mov  paletteOK, 1
+    jmp  PaletteDone
 ConhostPalette:
-    mov  origInfo.cbSize, SIZEOF CSBI_EX    ; Windows checks the structure size
-    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR origInfo ; original colours (restored at exit)
-    cmp  eax, 0                             ; did it fail?
-    je   PaletteDone                        ; yes: standard colours
-    mov  ecx, PAL_TRIES                     ; two tries
+    mov  origInfo.cbSize, SIZEOF CSBI_EX
+    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR origInfo
+    cmp  eax, 0
+    je   PaletteDone
+    mov  ecx, PAL_TRIES
 TryLoop:
-    call TryConhostPalette                  ; EAX = 1 if the colours are really set
-    cmp  eax, 0                             ; worked?
-    jne  ConhostOK                          ; yes
-    loop TryLoop                            ; no: try once more
-    jmp  PaletteDone                        ; still not: standard colours
+    call TryConhostPalette
+    cmp  eax, 0
+    jne  ConhostOK
+    loop TryLoop
+    jmp  PaletteDone
 ConhostOK:
-    mov  paletteMode, PAL_MODE_CONHOST      ; remember how to undo it
-    mov  paletteOK, 1                       ; custom colours are active
+    mov  paletteMode, PAL_MODE_CONHOST
+    mov  paletteOK, 1
 PaletteDone:
-    INVOKE SetConsoleCursorInfo, consoleHandle, ADDR cursorInfo ; hide the cursor again
-    mov  esi, OFFSET customRoles            ; assume the theme palette is active
-    cmp  paletteOK, 0                       ; did it work?
-    jne  HaveRoles                          ; yes: role = palette slot
-    mov  esi, OFFSET fallbackRoles          ; no: standard colours with the same look
+    INVOKE SetConsoleCursorInfo, consoleHandle, ADDR cursorInfo
+    mov  esi, OFFSET customRoles
+    cmp  paletteOK, 0
+    jne  HaveRoles
+    mov  esi, OFFSET fallbackRoles
 HaveRoles:
-    cld                                     ; copy forwards
-    mov  edi, OFFSET roleColors             ; EDI = the active table
-    mov  ecx, PAL_SLOTS                     ; 16 roles
-    rep  movsb                              ; copy the chosen table
+    cld
+    mov  edi, OFFSET roleColors
+    mov  ecx, PAL_SLOTS
+    rep  movsb
 IF DEBUG_LOG
-    INVOKE LogNum, ADDR lgMode, paletteMode ; 0 none, 1 conhost, 2 Windows Terminal
-    INVOKE LogNum, ADDR lgPalOK, paletteOK  ; which colour table is used
+    INVOKE LogNum, ADDR lgMode, paletteMode
+    INVOKE LogNum, ADDR lgPalOK, paletteOK
 ENDIF
-    ret                                     ; back to caller
+    ret
 LoadPalette ENDP
 
-;-------------------------------------------------------------
-; TryConhostPalette
-; Purpose:   One attempt to set the theme in the classic
-;            console: read the current settings (after the
-;            resize, so dwSize is the game size), replace only
-;            the colour table (slots 7 and 15 stay), apply it
-;            with SetPalette (window off-by-one fix), read it
-;            back and compare all 16 colours with REPE CMPSD.
-; Receives:  nothing
-; Returns:   EAX = 1 if the read-back colours match, else 0
-; Registers: EAX (ECX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Set the theme in the classic console and verify it
 TryConhostPalette PROC USES ecx esi edi
-    mov  themeInfo.cbSize, SIZEOF CSBI_EX   ; Windows checks the structure size
-    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR themeInfo ; fresh settings
-    cmp  eax, 0                             ; did it fail?
-    je   TryFail                            ; yes
-    mov  ecx, 0                             ; ECX = slot number 0..15
+    mov  themeInfo.cbSize, SIZEOF CSBI_EX
+    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR themeInfo
+    cmp  eax, 0
+    je   TryFail
+    mov  ecx, 0
 SlotLoop:
-    cmp  ecx, PAL_KEEP_TEXT                 ; slot 7 (normal text)?
-    je   NextSlot                           ; yes: keep it
-    cmp  ecx, PAL_KEEP_WHITE                ; slot 15 (white)?
-    je   NextSlot                           ; yes: keep it
-    mov  eax, themeColors[ecx*4]            ; EAX = theme colour for this slot (4 bytes each)
-    mov  themeInfo.ColorTable[ecx*4], eax   ; put it into the palette
+    cmp  ecx, PAL_KEEP_TEXT
+    je   NextSlot
+    cmp  ecx, PAL_KEEP_WHITE
+    je   NextSlot
+    mov  eax, themeColors[ecx*4]
+    mov  themeInfo.ColorTable[ecx*4], eax
 NextSlot:
-    inc  ecx                                ; next slot
-    cmp  ecx, PAL_SLOTS                     ; all 16 done?
-    jb   SlotLoop                           ; no: continue
-    INVOKE SetPalette, ADDR themeInfo       ; apply it (Right/Bottom +1 fix inside)
-    cmp  eax, 0                             ; did it fail?
-    je   TryFail                            ; yes
-    mov  checkInfo.cbSize, SIZEOF CSBI_EX   ; read the settings back
-    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR checkInfo ; what did Windows keep?
-    cmp  eax, 0                             ; did it fail?
-    je   TryFail                            ; yes
-    cld                                     ; compare forwards
-    mov  esi, OFFSET themeInfo.ColorTable   ; ESI = colours we wanted
-    mov  edi, OFFSET checkInfo.ColorTable   ; EDI = colours Windows has now
-    mov  ecx, PAL_SLOTS                     ; 16 DWORDs
-    repe cmpsd                              ; compare while equal
-    jne  TryFail                            ; a colour differs: not applied
-    mov  eax, 1                             ; all 16 colours match
-    ret                                     ; back to caller
+    inc  ecx
+    cmp  ecx, PAL_SLOTS
+    jb   SlotLoop
+    INVOKE SetPalette, ADDR themeInfo
+    cmp  eax, 0
+    je   TryFail
+    mov  checkInfo.cbSize, SIZEOF CSBI_EX
+    INVOKE GetConsoleScreenBufferInfoEx, consoleHandle, ADDR checkInfo
+    cmp  eax, 0
+    je   TryFail
+    cld
+    mov  esi, OFFSET themeInfo.ColorTable
+    mov  edi, OFFSET checkInfo.ColorTable
+    mov  ecx, PAL_SLOTS
+    repe cmpsd
+    jne  TryFail
+    mov  eax, 1
+    ret
 TryFail:
-    mov  eax, 0                             ; did not work
-    ret                                     ; back to caller
+    mov  eax, 0
+    ret
 TryConhostPalette ENDP
 
-;-------------------------------------------------------------
-; IsPseudoConsole
-; Purpose:   Find out if the game runs in a pseudo console
-;            (Windows Terminal, also used for F5 in Visual
-;            Studio): its console window class is
-;            "PseudoConsoleWindow" instead of "ConsoleWindowClass".
-; Receives:  nothing
-; Returns:   EAX = 1 for a pseudo console, 0 otherwise
-; Registers: EAX (ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Check if the game runs in Windows Terminal
 IsPseudoConsole PROC USES ecx edx
-    mov  classText, 0                       ; empty name if the calls fail
-    INVOKE GetConsoleWindow                 ; EAX = console window handle
-    INVOKE GetClassNameA, eax, ADDR classText, 63 ; its class name
-    INVOKE Str_compare, ADDR classText, ADDR pseudoName ; compare (sets the flags like CMP)
-    mov  eax, 0                             ; (MOV keeps the flags) assume classic console
-    jne  PseudoDone                         ; different name: classic console
-    mov  eax, 1                             ; pseudo console
+    mov  classText, 0
+    INVOKE GetConsoleWindow
+    INVOKE GetClassNameA, eax, ADDR classText, 63
+    INVOKE Str_compare, ADDR classText, ADDR pseudoName
+    mov  eax, 0
+    jne  PseudoDone
+    mov  eax, 1
 PseudoDone:
-    ret                                     ; back to caller
+    ret
 IsPseudoConsole ENDP
 
-;-------------------------------------------------------------
-; SetPaletteVT
-; Purpose:   Set the theme colours in Windows Terminal with VT
-;            sequences: ESC ] 4 ; index ; rgb:RR/GG/BB ESC backslash
-;            (OSC 4). Console colour slots are numbered
-;            blue=1, red=4; ANSI numbers are red=1, blue=4, so
-;            ansiOrder translates the slot number.
-; Receives:  nothing (uses themeColors)
-; Returns:   EAX = 1 if VT mode could be switched on, else 0
-; Registers: EAX (EBX, ECX, EDX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Set the theme colours in Windows Terminal (VT codes)
 SetPaletteVT PROC USES ebx ecx edx esi edi
-    INVOKE GetConsoleMode, consoleHandle, ADDR origOutMode ; current output mode
-    mov  eax, origOutMode                   ; EAX = mode
-    or   eax, VT_PROCESSING                 ; + understand VT sequences
-    INVOKE SetConsoleMode, consoleHandle, eax ; switch it on
-    cmp  eax, 0                             ; failed?
-    je   VTFail                             ; yes: standard colours
-    mov  ebx, 0                             ; EBX = slot (Windows calls keep EBX)
+    INVOKE GetConsoleMode, consoleHandle, ADDR origOutMode
+    mov  eax, origOutMode
+    or   eax, VT_PROCESSING
+    INVOKE SetConsoleMode, consoleHandle, eax
+    cmp  eax, 0
+    je   VTFail
+    mov  ebx, 0
 VTSlot:
-    cmp  ebx, PAL_KEEP_TEXT                 ; slot 7 (normal text)?
-    je   VTNext                             ; yes: keep it
-    cmp  ebx, PAL_KEEP_WHITE                ; slot 15 (white)?
-    je   VTNext                             ; yes: keep it
-    cld                                     ; copy forwards
-    mov  esi, OFFSET vtTemplate             ; ESI = ESC ]4;00;rgb:00/00/00 ESC backslash
-    mov  edi, OFFSET vtBuf                  ; EDI = buffer
-    mov  ecx, VT_LEN                        ; ECX = length
-    rep  movsb                              ; copy the template
-    movzx eax, ansiOrder[ebx]               ; EAX = ANSI colour number for this slot
-    INVOKE PutNumber, ADDR vtBuf + VT_IDX_POS, eax, 2 ; write it (2 digits)
-    mov  edx, themeColors[ebx*4]            ; EDX = 00BBGGRR
-    movzx eax, dl                           ; EAX = red
-    INVOKE PutHex2, ADDR vtBuf + VT_RED_POS, eax   ; write RR
-    movzx eax, dh                           ; EAX = green
-    INVOKE PutHex2, ADDR vtBuf + VT_GREEN_POS, eax ; write GG
-    shr  edx, 16                            ; DL = blue
-    movzx eax, dl                           ; EAX = blue
-    INVOKE PutHex2, ADDR vtBuf + VT_BLUE_POS, eax  ; write BB
-    INVOKE WriteConsoleA, consoleHandle, ADDR vtBuf, VT_LEN, ADDR vtWritten, 0 ; send the sequence
+    cmp  ebx, PAL_KEEP_TEXT
+    je   VTNext
+    cmp  ebx, PAL_KEEP_WHITE
+    je   VTNext
+    cld
+    mov  esi, OFFSET vtTemplate
+    mov  edi, OFFSET vtBuf
+    mov  ecx, VT_LEN
+    rep  movsb
+    movzx eax, ansiOrder[ebx]
+    INVOKE PutNumber, ADDR vtBuf + VT_IDX_POS, eax, 2
+    mov  edx, themeColors[ebx*4]
+    movzx eax, dl
+    INVOKE PutHex2, ADDR vtBuf + VT_RED_POS, eax
+    movzx eax, dh
+    INVOKE PutHex2, ADDR vtBuf + VT_GREEN_POS, eax
+    shr  edx, 16
+    movzx eax, dl
+    INVOKE PutHex2, ADDR vtBuf + VT_BLUE_POS, eax
+    INVOKE WriteConsoleA, consoleHandle, ADDR vtBuf, VT_LEN, ADDR vtWritten, 0
 VTNext:
-    inc  ebx                                ; next slot
-    cmp  ebx, PAL_SLOTS                     ; all 16 done?
-    jb   VTSlot                             ; no: continue
-    mov  eax, 1                             ; colours sent
-    ret                                     ; back to caller
+    inc  ebx
+    cmp  ebx, PAL_SLOTS
+    jb   VTSlot
+    mov  eax, 1
+    ret
 VTFail:
-    mov  eax, 0                             ; VT not available
-    ret                                     ; back to caller
+    mov  eax, 0
+    ret
 SetPaletteVT ENDP
 
-;-------------------------------------------------------------
-; PutHex2
-; Purpose:   Write a byte as two lowercase hex digits.
-; Receives:  dest = address, value = 0..255
-; Returns:   nothing (2 bytes at dest)
-; Registers: none (EAX, EDI saved by USES)
-;-------------------------------------------------------------
+; Write a byte as two hex digits
 PutHex2 PROC USES eax edi, dest:PTR BYTE, value:DWORD
-    mov  edi, dest                          ; EDI = where to write
-    mov  eax, value                         ; EAX = byte
-    shr  eax, 4                             ; high nibble
-    and  eax, 0Fh                           ; 0..15
-    mov  al, hexDigits[eax]                 ; its digit
-    mov  [edi], al                          ; store it
-    mov  eax, value                         ; EAX = byte again
-    and  eax, 0Fh                           ; low nibble
-    mov  al, hexDigits[eax]                 ; its digit
-    mov  [edi + 1], al                      ; store it
-    ret                                     ; back to caller
+    mov  edi, dest
+    mov  eax, value
+    shr  eax, 4
+    and  eax, 0Fh
+    mov  al, hexDigits[eax]
+    mov  [edi], al
+    mov  eax, value
+    and  eax, 0Fh
+    mov  al, hexDigits[eax]
+    mov  [edi + 1], al
+    ret
 PutHex2 ENDP
 
-;-------------------------------------------------------------
-; SetRoleColor
-; Purpose:   Set the console text colour for a colour ROLE:
-;            the role is looked up in roleColors, then
-;            SetTextColor is called with the real colour.
-; Receives:  EAX = role (C_SKY .. C_WHITE, background 0)
-; Returns:   nothing (console text colour changed)
-; Registers: none (EAX, EBX saved by USES)
-;-------------------------------------------------------------
+; Set the text colour for a colour role
 SetRoleColor PROC USES eax ebx
-    and  eax, 0Fh                           ; only the foreground role (background is role 0)
-    mov  ebx, OFFSET roleColors             ; EBX = the active role table
-    xlat                                    ; AL = [EBX + AL] = real console colour
-    call SetTextColor                       ; apply it
-    ret                                     ; back to caller
+    and  eax, 0Fh
+    mov  ebx, OFFSET roleColors
+    xlat
+    call SetTextColor
+    ret
 SetRoleColor ENDP
 
-;-------------------------------------------------------------
-; RestorePalette
-; Purpose:   Put the console colours back the way they were
-;            when the program started (only if LoadPalette
-;            changed them): conhost -> SetPalette(origInfo),
-;            Windows Terminal -> VT reset sequence (OSC 104).
-; Receives:  nothing (uses paletteMode, origInfo, origOutMode)
-; Returns:   nothing
-; Registers: none (EAX, ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Put the original console colours back
 RestorePalette PROC USES eax ecx edx
-    cmp  paletteMode, PAL_MODE_CONHOST      ; classic console palette changed?
-    jne  RestoreVT                          ; no
-    INVOKE SetPalette, ADDR origInfo        ; yes: original colours back
-    jmp  RestoreDone                        ; finished
+    cmp  paletteMode, PAL_MODE_CONHOST
+    jne  RestoreVT
+    INVOKE SetPalette, ADDR origInfo
+    jmp  RestoreDone
 RestoreVT:
-    cmp  paletteMode, PAL_MODE_VT           ; Windows Terminal colours changed?
-    jne  RestoreDone                        ; no: nothing to undo
-    INVOKE WriteConsoleA, consoleHandle, ADDR vtReset, VT_RESET_LEN, ADDR vtWritten, 0 ; ESC ]104 ESC \ = reset colours
-    INVOKE SetConsoleMode, consoleHandle, origOutMode ; old output mode back
+    cmp  paletteMode, PAL_MODE_VT
+    jne  RestoreDone
+    INVOKE WriteConsoleA, consoleHandle, ADDR vtReset, VT_RESET_LEN, ADDR vtWritten, 0
+    INVOKE SetConsoleMode, consoleHandle, origOutMode
 RestoreDone:
-    ret                                     ; back to caller
+    ret
 RestorePalette ENDP
 
-;-------------------------------------------------------------
-; SetPalette
-; Purpose:   Apply a CSBI_EX structure with
-;            SetConsoleScreenBufferInfoEx. Windows reads the
-;            window rectangle one cell smaller than it returned
-;            it, so Right and Bottom are increased by 1 for the
-;            call (and put back afterwards) to stop the window
-;            from shrinking.
-; Receives:  infoPtr = address of the CSBI_EX to apply
-; Returns:   EAX = 1 if it worked, 0 if not
-; Registers: EAX (EBX saved by USES)
-;-------------------------------------------------------------
+; Apply a palette with SetConsoleScreenBufferInfoEx
 SetPalette PROC USES ebx, infoPtr:PTR CSBI_EX
-    mov  ebx, infoPtr                       ; EBX = address of the structure
-    inc  (CSBI_EX PTR [ebx]).srWindow.Right ; window width fix
-    inc  (CSBI_EX PTR [ebx]).srWindow.Bottom ; window height fix
-    INVOKE SetConsoleScreenBufferInfoEx, consoleHandle, ebx ; apply palette and settings
+    mov  ebx, infoPtr
+    inc  (CSBI_EX PTR [ebx]).srWindow.Right
+    inc  (CSBI_EX PTR [ebx]).srWindow.Bottom
+    INVOKE SetConsoleScreenBufferInfoEx, consoleHandle, ebx
 IF DEBUG_LOG
-    push eax                                ; keep the result
-    push ecx                                ; keep ECX
-    mov  ecx, eax                           ; ECX = result
-    INVOKE GetLastError                     ; EAX = error code
-    INVOKE LogCall, ADDR lgSetEx, ecx, eax  ; log result and error
-    pop  ecx                                ; ECX again
-    pop  eax                                ; result again
+    push eax
+    push ecx
+    mov  ecx, eax
+    INVOKE GetLastError
+    INVOKE LogCall, ADDR lgSetEx, ecx, eax
+    pop  ecx
+    pop  eax
 ENDIF
-    dec  (CSBI_EX PTR [ebx]).srWindow.Right ; undo the fix in memory
-    dec  (CSBI_EX PTR [ebx]).srWindow.Bottom ; (DEC does not change EAX)
-    cmp  eax, 0                             ; did Windows accept it?
-    je   SetDone                            ; no: return 0
-    mov  eax, 1                             ; yes: return 1
+    dec  (CSBI_EX PTR [ebx]).srWindow.Right
+    dec  (CSBI_EX PTR [ebx]).srWindow.Bottom
+    cmp  eax, 0
+    je   SetDone
+    mov  eax, 1
 SetDone:
-    ret                                     ; back to caller
+    ret
 SetPalette ENDP
 
-;-------------------------------------------------------------
-; ComposeFrame
-; Purpose:   Build the whole console picture in charBuf
-;            (CHAR_INFO: character in the low word, colour in
-;            the high word) and draw it with ONE
-;            WriteConsoleOutput call.
-;            - text cells (HUD row, minimap: frameBuffer <> 0):
-;              that character, colour from attrBuffer
-;            - all other view cells: half block 223, the upper
-;              pixel is the foreground colour, the lower pixel
-;              the background colour:
-;              attr = colour(top) OR colour(bottom) SHL 4
-;            Roles become real colours through roleColors (XLAT).
-; Receives:  nothing (uses pixBuf, frameBuffer, attrBuffer)
-; Returns:   nothing (console changed)
-; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Pack pixels + text into CHAR_INFO cells and draw the frame in one call
 ComposeFrame PROC USES eax ebx ecx edx esi edi
-    LOCAL row:DWORD                         ; console row being built
-    mov  ebx, OFFSET roleColors             ; EBX = role table for XLAT
-    mov  edi, OFFSET charBuf                ; EDI = next CHAR_INFO cell
-    mov  esi, 0                             ; ESI = cell number (row*SCREEN_W + x)
-    mov  row, 0                             ; start at row 0
+    LOCAL row:DWORD
+    mov  ebx, OFFSET roleColors
+    mov  edi, OFFSET charBuf
+    mov  esi, 0
+    mov  row, 0
 ComposeRow:
-    mov  ecx, 0                             ; ECX = x
+    mov  ecx, 0
 ComposeCell:
-    movzx eax, frameBuffer[esi]             ; AL = text character (0 = none)
-    cmp  eax, 0                             ; text in this cell?
-    jne  TextCell                           ; yes: draw the text
-    cmp  row, SCREEN_H                      ; HUD row (no pixels there)?
-    jae  BlankCell                          ; yes: a space
-    ; ----- half block from two pixels -----
-    mov  edx, row                           ; EDX = console row
-    shl  edx, 1                             ; pixel row of the upper pixel = 2*row
-    imul edx, PIX_W                         ; * pixels per row
-    add  edx, ecx                           ; + x = index of the upper pixel
-    mov  al, pixBuf[edx + PIX_W]            ; AL = lower pixel role
-    xlat                                    ; AL = real colour of the lower pixel
-    shl  eax, 4                             ; lower pixel -> background nibble
-    push eax                                ; keep it
-    mov  al, pixBuf[edx]                    ; AL = upper pixel role
-    xlat                                    ; AL = real colour of the upper pixel
-    and  eax, 0Fh                           ; foreground nibble only
-    pop  edx                                ; EDX = background part
-    or   eax, edx                           ; attribute = fg OR bg
-    shl  eax, 16                            ; attribute goes in the high word
-    mov  ax, HALF_BLOCK                     ; character 223 in the low word
-    jmp  StoreCell                          ; store the cell
+    movzx eax, frameBuffer[esi]
+    cmp  eax, 0
+    jne  TextCell
+    cmp  row, SCREEN_H
+    jae  BlankCell
+    mov  edx, row
+    shl  edx, 1
+    imul edx, PIX_W
+    add  edx, ecx
+    mov  al, pixBuf[edx + PIX_W]
+    xlat
+    shl  eax, 4
+    push eax
+    mov  al, pixBuf[edx]
+    xlat
+    and  eax, 0Fh
+    pop  edx
+    or   eax, edx
+    shl  eax, 16
+    mov  ax, HALF_BLOCK
+    jmp  StoreCell
 BlankCell:
-    mov  eax, ' '                           ; empty HUD cell
+    mov  eax, ' '
 TextCell:
-    mov  edx, eax                           ; EDX = character
-    mov  ax, attrBuffer[esi*2]              ; AX = colour role of this cell
-    and  eax, 0Fh                           ; foreground role (background is role 0)
-    xlat                                    ; AL = real colour
-    shl  eax, 16                            ; attribute in the high word
-    mov  ax, dx                             ; character in the low word
+    mov  edx, eax
+    mov  ax, attrBuffer[esi*2]
+    and  eax, 0Fh
+    xlat
+    shl  eax, 16
+    mov  ax, dx
 StoreCell:
-    mov  [edi], eax                         ; store the CHAR_INFO (4 bytes)
-    add  edi, 4                             ; next CHAR_INFO
-    inc  esi                                ; next cell number
-    inc  ecx                                ; next x
-    cmp  ecx, SCREEN_W                      ; row finished?
-    jb   ComposeCell                        ; no: next cell
-    inc  row                                ; next row
-    cmp  row, BUF_H                         ; all rows (view + HUD)?
-    jb   ComposeRow                         ; no: next row
-    mov  writeRect.Left, 0                  ; Windows changes writeRect, so set it every frame
-    mov  writeRect.Top, 0                   ; top-left corner
-    mov  writeRect.Right, SCREEN_W - 1      ; bottom-right corner (inclusive)
-    mov  writeRect.Bottom, BUF_H - 1        ; last row
-    INVOKE WriteConsoleOutputA, consoleHandle, ADDR charBuf, gameSize, drawPos, ADDR writeRect ; one call draws everything
-    ret                                     ; back to caller
+    mov  [edi], eax
+    add  edi, 4
+    inc  esi
+    inc  ecx
+    cmp  ecx, SCREEN_W
+    jb   ComposeCell
+    inc  row
+    cmp  row, BUF_H
+    jb   ComposeRow
+    mov  writeRect.Left, 0
+    mov  writeRect.Top, 0
+    mov  writeRect.Right, SCREEN_W - 1
+    mov  writeRect.Bottom, BUF_H - 1
+    INVOKE WriteConsoleOutputA, consoleHandle, ADDR charBuf, gameSize, drawPos, ADDR writeRect
+    ret
 ComposeFrame ENDP
 
-;-------------------------------------------------------------
-; GetMoveDelta
-; Purpose:   Work out how far one forward step moves the
-;            player in X and in Y, for the current angle.
-;            dx = cos(angle) * MOVE_SPEED / 256
-;            dy = sin(angle) * MOVE_SPEED / 256
-; Receives:  angle (global)
-; Returns:   EAX = dx (Q8), EDX = dy (Q8)
-; Registers: EAX, EDX
-;-------------------------------------------------------------
+; One forward step in X and Y for the current angle
 GetMoveDelta PROC
-    mov  eax, angle                         ; EAX = current angle
-    call GetCos                             ; EAX = cos(angle) * 256
-    FIXMUL eax, MOVE_SPEED                  ; EAX = cos * MOVE_SPEED / 256 -> dx in Q8
-    push eax                                ; save dx on the stack
-    mov  eax, angle                         ; EAX = current angle
-    call GetSin                             ; EAX = sin(angle) * 256
-    FIXMUL eax, MOVE_SPEED                  ; EAX = sin * MOVE_SPEED / 256 -> dy in Q8
-    mov  edx, eax                           ; EDX = dy
-    pop  eax                                ; EAX = dx again
-    ret                                     ; back to caller
+    mov  eax, angle
+    call GetCos
+    FIXMUL eax, MOVE_SPEED
+    push eax
+    mov  eax, angle
+    call GetSin
+    FIXMUL eax, MOVE_SPEED
+    mov  edx, eax
+    pop  eax
+    ret
 GetMoveDelta ENDP
 
-;-------------------------------------------------------------
-; IsWall
-; Purpose:   Find out what kind of cell a Q8 position is in.
-; Receives:  testX, testY = position in Q8 (cells * 256)
-;            (a position outside the 16x16 map counts as a wall)
-; Returns:   EAX = CELL_WALL ('#'), CELL_EXIT ('E'),
-;                  CELL_KEY ('K') or CELL_FREE (anything else)
-; Registers: EAX (EBX, ESI saved by USES)
-;-------------------------------------------------------------
+; What kind of cell is at a position (free / wall / exit / key)
 IsWall PROC USES ebx esi, testX:SDWORD, testY:SDWORD
-    mov  eax, testY                         ; EAX = Y in Q8
-    sar  eax, 8                             ; EAX = row (whole cells)
-    cmp  eax, MAP_H - 1                     ; row above 15? (unsigned: a negative row is huge too)
-    ja   OutsideMap                         ; yes: outside the map
-    shl  eax, 4                             ; EAX = row * 16 (start of that map row)
-    mov  ebx, testX                         ; EBX = X in Q8
-    sar  ebx, 8                             ; EBX = column (whole cells)
-    cmp  ebx, MAP_W - 1                     ; column above 15? (unsigned check)
-    ja   OutsideMap                         ; yes: outside the map
-    add  eax, ebx                           ; EAX = row*16 + col = index into gameMap (0..255)
-    mov  esi, OFFSET gameMap                ; ESI = base address of the map
-    mov  bl, [esi + eax]                    ; BL = map character (base-index addressing)
-    mov  eax, CELL_WALL                     ; assume wall
-    cmp  bl, '#'                            ; is it a brick wall?
-    je   WallDone                           ; yes: return CELL_WALL
-    cmp  bl, '%'                            ; is it a stone wall?
-    je   WallDone                           ; yes: return CELL_WALL
-    mov  eax, CELL_EXIT                     ; assume exit
-    cmp  bl, 'E'                            ; is it the exit?
-    je   WallDone                           ; yes: return CELL_EXIT
-    mov  eax, CELL_KEY                      ; assume key
-    cmp  bl, 'K'                            ; is it a key?
-    je   WallDone                           ; yes: return CELL_KEY
-    mov  eax, CELL_FREE                     ; otherwise free floor
-    jmp  WallDone                           ; finished
+    mov  eax, testY
+    sar  eax, 8
+    cmp  eax, MAP_H - 1
+    ja   OutsideMap
+    shl  eax, 4
+    mov  ebx, testX
+    sar  ebx, 8
+    cmp  ebx, MAP_W - 1
+    ja   OutsideMap
+    add  eax, ebx
+    mov  esi, OFFSET gameMap
+    mov  bl, [esi + eax]
+    mov  eax, CELL_WALL
+    cmp  bl, '#'
+    je   WallDone
+    cmp  bl, '%'
+    je   WallDone
+    mov  eax, CELL_EXIT
+    cmp  bl, 'E'
+    je   WallDone
+    mov  eax, CELL_KEY
+    cmp  bl, 'K'
+    je   WallDone
+    mov  eax, CELL_FREE
+    jmp  WallDone
 OutsideMap:
-    mov  eax, CELL_WALL                     ; outside the map: treat as a wall
+    mov  eax, CELL_WALL
 WallDone:
-    ret                                     ; back to caller
+    ret
 IsWall ENDP
 
-;-------------------------------------------------------------
-; BoxCheck
-; Purpose:   Test the player's collision box at a Q8 position:
-;            a square with half-size PLAYER_R, so all 4 corners
-;            (x +- R, y +- R) are tested against the map. The
-;            player can then never get closer than R to a wall,
-;            also at corners. A key or the exit is reported
-;            before a plain wall, so it is never missed.
-; Receives:  testX, testY = box centre (Q8)
-; Returns:   EAX = CELL_FREE, CELL_WALL, CELL_EXIT or CELL_KEY
-;            boxHitX, boxHitY = the corner that touched it
-; Registers: EAX (EBX, ECX, EDX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Test the 4 corners of the player's collision box
 BoxCheck PROC USES ebx ecx edx esi edi, testX:SDWORD, testY:SDWORD
-    mov  ebx, CELL_FREE                     ; EBX = result so far
-    mov  esi, -PLAYER_R                     ; ESI = corner offset in X (-R, then +R)
+    mov  ebx, CELL_FREE
+    mov  esi, -PLAYER_R
 BoxX:
-    mov  edi, -PLAYER_R                     ; EDI = corner offset in Y (-R, then +R)
+    mov  edi, -PLAYER_R
 BoxY:
-    mov  ecx, testX                         ; ECX = corner X
-    add  ecx, esi                           ; testX +- R
-    mov  edx, testY                         ; EDX = corner Y
-    add  edx, edi                           ; testY +- R
-    INVOKE IsWall, ecx, edx                 ; EAX = what is at this corner
-    cmp  eax, CELL_FREE                     ; free?
-    je   NextCorner                         ; yes: nothing to report
-    cmp  ebx, CELL_FREE                     ; first thing found?
-    je   TakeCorner                         ; yes: report it
-    cmp  eax, CELL_WALL                     ; only another wall?
-    je   NextCorner                         ; yes: keep the first one
+    mov  ecx, testX
+    add  ecx, esi
+    mov  edx, testY
+    add  edx, edi
+    INVOKE IsWall, ecx, edx
+    cmp  eax, CELL_FREE
+    je   NextCorner
+    cmp  ebx, CELL_FREE
+    je   TakeCorner
+    cmp  eax, CELL_WALL
+    je   NextCorner
 TakeCorner:
-    mov  ebx, eax                           ; remember the cell type
-    mov  boxHitX, ecx                       ; and the corner that touched it
-    mov  boxHitY, edx                       ; (CollectKey needs a point in the key cell)
+    mov  ebx, eax
+    mov  boxHitX, ecx
+    mov  boxHitY, edx
 NextCorner:
-    add  edi, PLAYER_R * 2                  ; next Y offset: -R -> +R
-    cmp  edi, PLAYER_R                      ; both Y offsets done? (signed)
-    jle  BoxY                               ; no: test the other one
-    add  esi, PLAYER_R * 2                  ; next X offset: -R -> +R
-    cmp  esi, PLAYER_R                      ; both X offsets done? (signed)
-    jle  BoxX                               ; no: test the other column
-    mov  eax, ebx                           ; EAX = result
-    ret                                     ; back to caller
+    add  edi, PLAYER_R * 2
+    cmp  edi, PLAYER_R
+    jle  BoxY
+    add  esi, PLAYER_R * 2
+    cmp  esi, PLAYER_R
+    jle  BoxX
+    mov  eax, ebx
+    ret
 BoxCheck ENDP
 
-;-------------------------------------------------------------
-; TryMove
-; Purpose:   Move the player by (moveDX, moveDY) if the whole
-;            collision box (BoxCheck) stays free. X and Y are
-;            checked separately so the player slides along
-;            walls. steps++ if it moved. A box touching the
-;            exit or a key is handled by HandleCell (exit and
-;            keys block like walls).
-; Receives:  moveDX, moveDY = movement in Q8
-; Returns:   posX, posY, steps (and via HandleCell: keys,
-;            wonFlag, message) updated
-; Registers: none (EAX, ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Move the player if the collision box stays free (X and Y separately)
 TryMove PROC USES eax ecx edx, moveDX:SDWORD, moveDY:SDWORD
-    mov  ecx, 0                             ; ECX = 1 once we really move
-    cmp  moveDX, 0                          ; any X movement at all?
-    je   TryY                               ; no: skip the X test
-    mov  edx, posX                          ; EDX = current X
-    add  edx, moveDX                        ; EDX = new X
-    INVOKE BoxCheck, edx, posY              ; box at the new X, old Y: what does it touch?
-    INVOKE HandleCell, eax, boxHitX, boxHitY ; exit or key touched? (EAX kept)
-    cmp  eax, CELL_FREE                     ; box completely free?
-    jne  TryY                               ; no: do not move in X
-    mov  posX, edx                          ; free: accept the new X
-    mov  ecx, 1                             ; remember that we moved
+    mov  ecx, 0
+    cmp  moveDX, 0
+    je   TryY
+    mov  edx, posX
+    add  edx, moveDX
+    INVOKE BoxCheck, edx, posY
+    INVOKE HandleCell, eax, boxHitX, boxHitY
+    cmp  eax, CELL_FREE
+    jne  TryY
+    mov  posX, edx
+    mov  ecx, 1
 TryY:
-    cmp  moveDY, 0                          ; any Y movement at all?
-    je   MoveDone                           ; no: skip the Y test
-    mov  edx, posY                          ; EDX = current Y
-    add  edx, moveDY                        ; EDX = new Y
-    INVOKE BoxCheck, posX, edx              ; box at the (maybe new) X, new Y
-    INVOKE HandleCell, eax, boxHitX, boxHitY ; exit or key touched? (EAX kept)
-    cmp  eax, CELL_FREE                     ; box completely free?
-    jne  MoveDone                           ; no: do not move in Y
-    mov  posY, edx                          ; free: accept the new Y
-    mov  ecx, 1                             ; remember that we moved
+    cmp  moveDY, 0
+    je   MoveDone
+    mov  edx, posY
+    add  edx, moveDY
+    INVOKE BoxCheck, posX, edx
+    INVOKE HandleCell, eax, boxHitX, boxHitY
+    cmp  eax, CELL_FREE
+    jne  MoveDone
+    mov  posY, edx
+    mov  ecx, 1
 MoveDone:
-    cmp  ecx, 0                             ; did we move at all?
-    je   NoStep                             ; no: steps stay the same
-    inc  steps                              ; yes: count one step
+    cmp  ecx, 0
+    je   NoStep
+    inc  steps
 NoStep:
-    ret                                     ; back to caller
+    ret
 TryMove ENDP
 
-;-------------------------------------------------------------
-; CenterAssist
-; Purpose:   Corridor centering while W or S is held: if the
-;            player moves mostly along X and the cells above and
-;            below are walls (a corridor), Y is nudged towards
-;            the cell centre by offset/8 (at most 4 Q8 units per
-;            frame); the same for movement along Y with X.
-;            Turning at a junction then lines up with the next
-;            corridor.
-; Receives:  nothing (uses posX, posY, angle)
-; Returns:   posX or posY may change slightly
-; Registers: none (EAX, EBX, ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Pull the player to the middle of a corridor while moving
 CenterAssist PROC USES eax ebx ecx edx
-    mov  eax, angle                         ; EAX = facing angle
-    call GetCos                             ; EAX = cos * 256
-    mov  ebx, eax                           ; EBX = cos
-    cmp  ebx, 0                             ; negative? (signed)
-    jge  CosAbs                             ; no
-    neg  ebx                                ; EBX = |cos|
+    mov  eax, angle
+    call GetCos
+    mov  ebx, eax
+    cmp  ebx, 0
+    jge  CosAbs
+    neg  ebx
 CosAbs:
-    mov  eax, angle                         ; EAX = facing angle
-    call GetSin                             ; EAX = sin * 256
-    cmp  eax, 0                             ; negative? (signed)
-    jge  SinAbs                             ; no
-    neg  eax                                ; EAX = |sin|
+    mov  eax, angle
+    call GetSin
+    cmp  eax, 0
+    jge  SinAbs
+    neg  eax
 SinAbs:
-    cmp  ebx, eax                           ; |cos| >= |sin| ?
-    jb   AlongY                             ; no: moving mostly along Y
-    ; ----- moving along X: corridor walls above and below? -----
-    mov  ecx, posY                          ; ECX = Y
-    sub  ecx, CELL_SIZE                     ; one cell up
-    INVOKE IsWall, posX, ecx                ; what is above?
-    cmp  eax, CELL_FREE                     ; open above?
-    je   AssistDone                         ; yes: not a corridor
-    mov  ecx, posY                          ; ECX = Y
-    add  ecx, CELL_SIZE                     ; one cell down
-    INVOKE IsWall, posX, ecx                ; what is below?
-    cmp  eax, CELL_FREE                     ; open below?
-    je   AssistDone                         ; yes: not a corridor
-    INVOKE CenterNudge, posY                ; EAX = small step towards the centre
-    add  posY, eax                          ; nudge Y
-    jmp  AssistDone                         ; finished
+    cmp  ebx, eax
+    jb   AlongY
+    mov  ecx, posY
+    sub  ecx, CELL_SIZE
+    INVOKE IsWall, posX, ecx
+    cmp  eax, CELL_FREE
+    je   AssistDone
+    mov  ecx, posY
+    add  ecx, CELL_SIZE
+    INVOKE IsWall, posX, ecx
+    cmp  eax, CELL_FREE
+    je   AssistDone
+    INVOKE CenterNudge, posY
+    add  posY, eax
+    jmp  AssistDone
 AlongY:
-    ; ----- moving along Y: corridor walls left and right? -----
-    mov  ecx, posX                          ; ECX = X
-    sub  ecx, CELL_SIZE                     ; one cell left
-    INVOKE IsWall, ecx, posY                ; what is left?
-    cmp  eax, CELL_FREE                     ; open on the left?
-    je   AssistDone                         ; yes: not a corridor
-    mov  ecx, posX                          ; ECX = X
-    add  ecx, CELL_SIZE                     ; one cell right
-    INVOKE IsWall, ecx, posY                ; what is right?
-    cmp  eax, CELL_FREE                     ; open on the right?
-    je   AssistDone                         ; yes: not a corridor
-    INVOKE CenterNudge, posX                ; EAX = small step towards the centre
-    add  posX, eax                          ; nudge X
+    mov  ecx, posX
+    sub  ecx, CELL_SIZE
+    INVOKE IsWall, ecx, posY
+    cmp  eax, CELL_FREE
+    je   AssistDone
+    mov  ecx, posX
+    add  ecx, CELL_SIZE
+    INVOKE IsWall, ecx, posY
+    cmp  eax, CELL_FREE
+    je   AssistDone
+    INVOKE CenterNudge, posX
+    add  posX, eax
 AssistDone:
-    ret                                     ; back to caller
+    ret
 CenterAssist ENDP
 
-;-------------------------------------------------------------
-; CenterNudge
-; Purpose:   Step towards the centre of the current cell on one
-;            axis: (centre - pos) / 8, limited to -4..+4.
-; Receives:  axisPos = position on this axis (Q8)
-; Returns:   EAX = nudge (signed Q8)
-; Registers: EAX only
-;-------------------------------------------------------------
+; Small step towards the centre of the current cell
 CenterNudge PROC, axisPos:SDWORD
-    mov  eax, axisPos                       ; EAX = position
-    and  eax, NOT (CELL_SIZE - 1)           ; start of this cell
-    add  eax, CELL_SIZE / 2                 ; centre of this cell
-    sub  eax, axisPos                       ; offset to the centre (signed)
-    sar  eax, 3                             ; / 8 (SAR keeps the sign)
-    cmp  eax, NUDGE_MAX                     ; too far right/down? (signed)
-    jle  NudgeNotBig                        ; no
-    mov  eax, NUDGE_MAX                     ; yes: limit
+    mov  eax, axisPos
+    and  eax, NOT (CELL_SIZE - 1)
+    add  eax, CELL_SIZE / 2
+    sub  eax, axisPos
+    sar  eax, 3
+    cmp  eax, NUDGE_MAX
+    jle  NudgeNotBig
+    mov  eax, NUDGE_MAX
 NudgeNotBig:
-    cmp  eax, -NUDGE_MAX                    ; too far left/up? (signed)
-    jge  NudgeDone                          ; no
-    mov  eax, -NUDGE_MAX                    ; yes: limit
+    cmp  eax, -NUDGE_MAX
+    jge  NudgeDone
+    mov  eax, -NUDGE_MAX
 NudgeDone:
-    ret                                     ; back to caller
+    ret
 CenterNudge ENDP
 
-;-------------------------------------------------------------
-; GetTurnSpeed
-; Purpose:   Turn acceleration: the longer A/D is held, the
-;            faster the turn. turnHold counts frames:
-;            frames 1-3: 2 deg, 4-6: 3, 7-9: 4, then 5 per frame
-;            (about 0.3 s to full speed). A short tap turns
-;            finely.
-; Receives:  nothing (uses turnHold)
-; Returns:   EAX = degrees for this frame
-; Registers: EAX only
-;-------------------------------------------------------------
+; Turn speed: faster the longer A/D is held
 GetTurnSpeed PROC
-    mov  eax, turnHold                      ; EAX = frames A/D has been held
-    dec  eax                                ; 0-based
-    cmp  eax, TURN_RAMP_LEN - 1             ; past the ramp?
-    jbe  RampIndexOK                        ; no
-    mov  eax, TURN_RAMP_LEN - 1             ; yes: last entry (full speed)
+    mov  eax, turnHold
+    dec  eax
+    cmp  eax, TURN_RAMP_LEN - 1
+    jbe  RampIndexOK
+    mov  eax, TURN_RAMP_LEN - 1
 RampIndexOK:
-    movzx eax, turnRamp[eax]                ; degrees for this frame
-    ret                                     ; back to caller
+    movzx eax, turnRamp[eax]
+    ret
 GetTurnSpeed ENDP
 
-;-------------------------------------------------------------
-; HandleCell
-; Purpose:   React to the cell a movement probe touched:
-;            exit -> TouchExit, key -> CollectKey.
-;            Other cells need nothing here.
-; Receives:  cellType     = result of IsWall
-;            testX, testY = the probe point (Q8)
-; Returns:   nothing (keys, gameMap, wonFlag, message may change)
-; Registers: none (EAX saved by USES)
-;-------------------------------------------------------------
+; Handle a touched exit or key cell
 HandleCell PROC USES eax, cellType:DWORD, testX:SDWORD, testY:SDWORD
-    cmp  cellType, CELL_EXIT                ; touching the exit door?
-    jne  NotExitCell                        ; no
-    call TouchExit                          ; yes: win or "door locked"
-    jmp  CellDone                           ; finished
+    cmp  cellType, CELL_EXIT
+    jne  NotExitCell
+    call TouchExit
+    jmp  CellDone
 NotExitCell:
-    cmp  cellType, CELL_KEY                 ; touching a key?
-    jne  CellDone                           ; no: nothing to do
-    INVOKE CollectKey, testX, testY         ; yes: pick it up
+    cmp  cellType, CELL_KEY
+    jne  CellDone
+    INVOKE CollectKey, testX, testY
 CellDone:
-    ret                                     ; back to caller
+    ret
 HandleCell ENDP
 
-;-------------------------------------------------------------
-; CollectKey
-; Purpose:   Pick up the key at a Q8 position: the map cell
-;            becomes floor, keys++, and the HUD shows
-;            "KEY FOUND! n/3" for 2 seconds.
-; Receives:  testX, testY = a point inside the key cell (Q8)
-; Returns:   gameMap, keys, keyMsg, message updated
-; Registers: none (EAX, EBX saved by USES)
-;-------------------------------------------------------------
+; Pick up a key: cell becomes floor, keys + 1
 CollectKey PROC USES eax ebx, testX:SDWORD, testY:SDWORD
-    mov  eax, testY                         ; EAX = Y in Q8
-    sar  eax, 8                             ; row (IsWall already checked it is inside the map)
-    shl  eax, 4                             ; row * 16
-    mov  ebx, testX                         ; EBX = X in Q8
-    sar  ebx, 8                             ; column
-    add  eax, ebx                           ; EAX = row*16 + col
-    mov  gameMap[eax], '.'                  ; the key is gone: plain floor now
-    inc  keys                               ; one more key
-    mov  eax, keys                          ; EAX = keys collected (1..3)
-    add  al, '0'                            ; turn it into a digit character
-    mov  keyMsg[KEY_MSG_DIGIT], al          ; put it into "KEY FOUND! n/3"
-    INVOKE ShowMessage, ADDR keyMsg, KEY_MSG_ATTR ; show it in the HUD
-    ret                                     ; back to caller
+    mov  eax, testY
+    sar  eax, 8
+    shl  eax, 4
+    mov  ebx, testX
+    sar  ebx, 8
+    add  eax, ebx
+    mov  gameMap[eax], '.'
+    inc  keys
+    mov  eax, keys
+    add  al, '0'
+    mov  keyMsg[KEY_MSG_DIGIT], al
+    INVOKE ShowMessage, ADDR keyMsg, KEY_MSG_ATTR
+    ret
 CollectKey ENDP
 
-;-------------------------------------------------------------
-; TouchExit
-; Purpose:   The player touched the exit door. With all 3 keys
-;            the player wins; otherwise the HUD shows
-;            "DOOR LOCKED - FIND 3 KEYS" for 2 seconds.
-; Receives:  nothing (uses keys)
-; Returns:   wonFlag = 1 or message set
-; Registers: none
-;-------------------------------------------------------------
+; Exit door: win with 3 keys, otherwise DOOR LOCKED
 TouchExit PROC
-    cmp  keys, KEYS_NEEDED                  ; all keys collected? (unsigned count)
-    jb   DoorLocked                         ; no: the door stays locked
-    mov  wonFlag, 1                         ; yes: the player escapes
-    ret                                     ; back to caller
+    cmp  keys, KEYS_NEEDED
+    jb   DoorLocked
+    mov  wonFlag, 1
+    ret
 DoorLocked:
-    INVOKE ShowMessage, ADDR lockedMsg, LOCKED_ATTR ; tell the player why
-    ret                                     ; back to caller
+    INVOKE ShowMessage, ADDR lockedMsg, LOCKED_ATTR
+    ret
 TouchExit ENDP
 
-;-------------------------------------------------------------
-; ShowMessage
-; Purpose:   Start showing a message in the HUD for MSG_MS
-;            (2000) milliseconds.
-; Receives:  msgPtr  = address of a 0-terminated message
-;            msgAttr = its colour
-; Returns:   msgText, msgColor, msgStart set
-; Registers: none (EAX saved by USES)
-;-------------------------------------------------------------
+; Start a 2-second HUD message
 ShowMessage PROC USES eax, msgPtr:PTR BYTE, msgAttr:DWORD
-    mov  eax, msgPtr                        ; EAX = message address
-    mov  msgText, eax                       ; remember which message
-    mov  eax, msgAttr                       ; EAX = colour
-    mov  msgColor, eax                      ; remember its colour
-    call GetMseconds                        ; EAX = time now
-    mov  msgStart, eax                      ; the message starts now
-    ret                                     ; back to caller
+    mov  eax, msgPtr
+    mov  msgText, eax
+    mov  eax, msgAttr
+    mov  msgColor, eax
+    call GetMseconds
+    mov  msgStart, eax
+    ret
 ShowMessage ENDP
 
-;-------------------------------------------------------------
-; MsSince
-; Purpose:   Milliseconds since an earlier GetMseconds value.
-;            GetMseconds restarts at 0 at midnight, so a
-;            negative difference gets one day added.
-; Receives:  since = earlier GetMseconds value
-; Returns:   EAX = milliseconds passed
-; Registers: EAX only
-;-------------------------------------------------------------
+; Milliseconds since an earlier time
 MsSince PROC, since:DWORD
-    call GetMseconds                        ; EAX = milliseconds since midnight now
-    sub  eax, since                         ; EAX = milliseconds since then
-    jns  SinceOK                            ; not negative: normal case
-    add  eax, MS_PER_DAY                    ; negative: midnight passed, add one day
+    call GetMseconds
+    sub  eax, since
+    jns  SinceOK
+    add  eax, MS_PER_DAY
 SinceOK:
-    ret                                     ; back to caller
+    ret
 MsSince ENDP
 
-;-------------------------------------------------------------
-; DrawMessage
-; Purpose:   If a message is active (shown for less than 2 s),
-;            write it over the controls text in the HUD, in its
-;            colour. When the time is over, clear it.
-; Receives:  nothing (uses msgText, msgColor, msgStart)
-; Returns:   nothing (HUD row of the frame changed, msgText may
-;            become 0)
-; Registers: none (EAX, ECX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Draw the active HUD message
 DrawMessage PROC USES eax ecx esi edi
-    cmp  msgText, 0                         ; any message?
-    je   MsgDone                            ; no: keep the controls text
-    INVOKE MsSince, msgStart                ; EAX = how long it has been shown
-    cmp  eax, MSG_MS                        ; 2 seconds or more?
-    jb   MsgShow                            ; no: show it
-    mov  msgText, 0                         ; yes: the message is over
-    jmp  MsgDone                            ; keep the controls text
+    cmp  msgText, 0
+    je   MsgDone
+    INVOKE MsSince, msgStart
+    cmp  eax, MSG_MS
+    jb   MsgShow
+    mov  msgText, 0
+    jmp  MsgDone
 MsgShow:
-    cld                                     ; string instructions go forwards
-    mov  al, ' '                            ; blank out the message area first
-    mov  ecx, SCREEN_W - HUD_MSG_POS        ; ECX = cells from the message column to the end
-    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W + HUD_MSG_POS ; EDI = message area
-    rep  stosb                              ; fill it with spaces
-    mov  eax, msgColor                      ; AX = message colour
-    mov  ecx, SCREEN_W - HUD_MSG_POS        ; ECX = same number of cells
-    mov  edi, OFFSET attrBuffer + (HUD_ROW * SCREEN_W + HUD_MSG_POS) * 2 ; EDI = their colours
-    rep  stosw                              ; colour the whole area
-    mov  esi, msgText                       ; ESI = message text
-    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W + HUD_MSG_POS ; EDI = message area
+    cld
+    mov  al, ' '
+    mov  ecx, SCREEN_W - HUD_MSG_POS
+    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W + HUD_MSG_POS
+    rep  stosb
+    mov  eax, msgColor
+    mov  ecx, SCREEN_W - HUD_MSG_POS
+    mov  edi, OFFSET attrBuffer + (HUD_ROW * SCREEN_W + HUD_MSG_POS) * 2
+    rep  stosw
+    mov  esi, msgText
+    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W + HUD_MSG_POS
 MsgCopy:
-    lodsb                                   ; AL = [ESI], ESI++
-    cmp  al, 0                              ; end of the message?
-    je   MsgDone                            ; yes: finished
-    stosb                                   ; [EDI] = AL, EDI++
-    jmp  MsgCopy                            ; next character
+    lodsb
+    cmp  al, 0
+    je   MsgDone
+    stosb
+    jmp  MsgCopy
 MsgDone:
-    ret                                     ; back to caller
+    ret
 DrawMessage ENDP
 
-;-------------------------------------------------------------
-; TurnPlayer
-; Purpose:   Add turnAmount to angle and keep it in 0..359.
-; Receives:  turnAmount = degrees to turn (+ right, - left)
-; Returns:   angle updated
-; Registers: none (EAX saved by USES)
-;-------------------------------------------------------------
+; Rotate the player: add degrees to the angle
 TurnPlayer PROC USES eax, turnAmount:SDWORD
-    mov  eax, angle                         ; EAX = current angle
-    add  eax, turnAmount                    ; turn
-    call WrapAngle                          ; keep it in 0..359
-    mov  angle, eax                         ; save the new angle
-    ret                                     ; back to caller
+    mov  eax, angle
+    add  eax, turnAmount
+    call WrapAngle
+    mov  angle, eax
+    ret
 TurnPlayer ENDP
 
-;-------------------------------------------------------------
-; WrapAngle
-; Purpose:   Bring an angle back into 0..359.
-; Receives:  EAX = angle, between -360 and 719
-; Returns:   EAX = same direction, now 0..359
-; Registers: EAX only
-;-------------------------------------------------------------
+; Keep an angle in 0..359
 WrapAngle PROC
-    cmp  eax, 0                             ; below 0? (signed compare)
-    jge  WrapNotNegative                    ; no
-    add  eax, 360                           ; yes: e.g. -5 becomes 355
+    cmp  eax, 0
+    jge  WrapNotNegative
+    add  eax, 360
 WrapNotNegative:
-    cmp  eax, 360                           ; 360 or more?
-    jl   WrapDone                           ; no: already fine
-    sub  eax, 360                           ; yes: e.g. 365 becomes 5
+    cmp  eax, 360
+    jl   WrapDone
+    sub  eax, 360
 WrapDone:
-    ret                                     ; back to caller
+    ret
 WrapAngle ENDP
 
-;-------------------------------------------------------------
-; AnyKeyDown
-; Purpose:   Check every keyboard key code (8..254) to see if
-;            any key is still held down.
-; Receives:  nothing
-; Returns:   EAX = 1 if some key is held, 0 if none
-; Registers: EAX (ECX saved by USES)
-;-------------------------------------------------------------
+; Check if any key is held
 AnyKeyDown PROC USES ecx
-    mov  ecx, 8                             ; codes 1..7 are mouse buttons, start at 8
+    mov  ecx, 8
 CheckNextKey:
-    INVOKE KeyDown, ecx                     ; EAX = 1 if this key is held
-    cmp  eax, 0                             ; held?
-    jne  FoundKey                           ; yes: stop looking
-    inc  ecx                                ; next key code
-    cmp  ecx, 255                           ; checked all of them?
-    jb   CheckNextKey                       ; no: keep checking
-    mov  eax, 0                             ; no key is held
-    ret                                     ; back to caller
+    INVOKE KeyDown, ecx
+    cmp  eax, 0
+    jne  FoundKey
+    inc  ecx
+    cmp  ecx, 255
+    jb   CheckNextKey
+    mov  eax, 0
+    ret
 FoundKey:
-    mov  eax, 1                             ; a key is held
-    ret                                     ; back to caller
+    mov  eax, 1
+    ret
 AnyKeyDown ENDP
 
-;-------------------------------------------------------------
-; WaitKeysReleased
-; Purpose:   After the title screen, wait (max 2 s) until no
-;            key is held, then set mWasDown/qWasDown from the
-;            real key state. So the key that closed the title
-;            screen can never count as an M or Q press.
-; Receives:  nothing
-; Returns:   mWasDown, qWasDown set
-; Registers: none (EAX, ECX saved by USES)
-;-------------------------------------------------------------
+; Wait until all keys are released
 WaitKeysReleased PROC USES eax ecx
-    mov  ecx, KEY_WAIT_TRIES                ; give up after this many tries
+    mov  ecx, KEY_WAIT_TRIES
 WaitLoop:
-    call AnyKeyDown                         ; EAX = 1 if something is still held
-    cmp  eax, 0                             ; all keys up?
-    je   KeysReleased                       ; yes: done waiting
-    mov  eax, 10                            ; 10 milliseconds
-    call Delay                              ; wait a little and look again
-    loop WaitLoop                           ; ECX--, try again until ECX = 0
+    call AnyKeyDown
+    cmp  eax, 0
+    je   KeysReleased
+    mov  eax, 10
+    call Delay
+    loop WaitLoop
 KeysReleased:
-    INVOKE KeyDown, 'M'                     ; is M held right now?
-    mov  mWasDown, al                       ; if yes, the game won't see it as a new press
-    INVOKE KeyDown, 'Q'                     ; is Q held right now?
-    mov  qWasDown, al                       ; same for Q
-    ret                                     ; back to caller
+    INVOKE KeyDown, 'M'
+    mov  mWasDown, al
+    INVOKE KeyDown, 'Q'
+    mov  qWasDown, al
+    ret
 WaitKeysReleased ENDP
 
-;-------------------------------------------------------------
-; InitInput
-; Purpose:   Get the console input handle (used to throw away
-;            waiting key events each frame).
-; Receives:  nothing
-; Returns:   inputHandle is set
-; Registers: none (EAX, ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Get the console input handle
 InitInput PROC USES eax ecx edx
-    INVOKE GetStdHandle, STD_INPUT_HANDLE   ; ask Windows for the console input handle
-    mov  inputHandle, eax                   ; save it
-    ret                                     ; back to caller
+    INVOKE GetStdHandle, STD_INPUT_HANDLE
+    mov  inputHandle, eax
+    ret
 InitInput ENDP
 
-;-------------------------------------------------------------
-; KeyDown
-; Purpose:   Check if a key is being held down right now.
-; Receives:  vKey = virtual key code ('W', 'A', ... are the
-;            same as their uppercase ASCII codes)
-; Returns:   EAX = 1 if held, 0 if not
-; Registers: EAX (ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Is a key held right now (GetAsyncKeyState)
 KeyDown PROC USES ecx edx, vKey:DWORD
-    INVOKE GetAsyncKeyState, vKey           ; AX = key state
-    test ax, 8000h                          ; bit 15 set = key is down
-    jz   KeyIsUp                            ; bit is 0: key is up
-    mov  eax, 1                             ; key is down: return 1
-    jmp  KeyDownDone                        ; finished
+    INVOKE GetAsyncKeyState, vKey
+    test ax, 8000h
+    jz   KeyIsUp
+    mov  eax, 1
+    jmp  KeyDownDone
 KeyIsUp:
-    mov  eax, 0                             ; key is up: return 0
+    mov  eax, 0
 KeyDownDone:
-    ret                                     ; back to caller
+    ret
 KeyDown ENDP
 
-;-------------------------------------------------------------
-; KeyPressed
-; Purpose:   Report a key only on the frame it goes DOWN
-;            (held key = one press, not one per frame).
-; Receives:  vKey    = virtual key code
-;            prevPtr = address of a BYTE holding last frame's
-;                      state (1 = was down); it is updated
-; Returns:   EAX = 1 if the key is down now AND was up before
-; Registers: EAX (ECX, ESI saved by USES)
-;-------------------------------------------------------------
+; Report a key only on a new press
 KeyPressed PROC USES ecx esi, vKey:DWORD, prevPtr:PTR BYTE
-    INVOKE KeyDown, vKey                    ; EAX = 1 if down now
-    mov  esi, prevPtr                       ; ESI = address of the "was down" byte
-    movzx ecx, BYTE PTR [esi]               ; ECX = last frame's state
-    mov  [esi], al                          ; save this frame's state for next time
-    cmp  ecx, 0                             ; was it up last frame?
-    je   PressDone                          ; yes: EAX (0 or 1) is the answer
-    mov  eax, 0                             ; it was already down: not a new press
+    INVOKE KeyDown, vKey
+    mov  esi, prevPtr
+    movzx ecx, BYTE PTR [esi]
+    mov  [esi], al
+    cmp  ecx, 0
+    je   PressDone
+    mov  eax, 0
 PressDone:
-    ret                                     ; back to caller
+    ret
 KeyPressed ENDP
 
-;-------------------------------------------------------------
-; HandleInput
-; Purpose:   Check the keys every frame. Held keys: A/D turn
-;            (accelerating, GetTurnSpeed), W/S move with
-;            corridor centering (they can combine, e.g. W+A). Single
-;            presses: M toggles minimap, Q quits. Old console
-;            key events are thrown away so they don't pile up.
-; Receives:  nothing
-; Returns:   posX/posY/angle/showMinimap/quitFlag may change
-; Registers: none (EAX, EBX, ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Read the keys each frame: turn, move, minimap, quit
 HandleInput PROC USES eax ebx ecx edx
-    INVOKE FlushConsoleInputBuffer, inputHandle ; drop waiting key events
-    ; ----- turn acceleration: count frames while A or D is held -----
-    INVOKE KeyDown, 'A'                     ; A held?
-    mov  ebx, eax                           ; EBX = A state
-    INVOKE KeyDown, 'D'                     ; D held?
-    or   eax, ebx                           ; A or D held?
-    jnz  TurnHeld                           ; yes
-    mov  turnHold, 0                        ; no: next turn starts slowly again
-    jmp  CheckA                             ; go on
+    INVOKE FlushConsoleInputBuffer, inputHandle
+    INVOKE KeyDown, 'A'
+    mov  ebx, eax
+    INVOKE KeyDown, 'D'
+    or   eax, ebx
+    jnz  TurnHeld
+    mov  turnHold, 0
+    jmp  CheckA
 TurnHeld:
-    cmp  turnHold, TURN_RAMP_LEN            ; already at full speed?
-    jae  CheckA                             ; yes: stop counting
-    inc  turnHold                           ; one more frame held
+    cmp  turnHold, TURN_RAMP_LEN
+    jae  CheckA
+    inc  turnHold
 CheckA:
-    INVOKE KeyDown, 'A'                     ; A held?
-    cmp  eax, 0                             ; 0 = not held
-    je   CheckD                             ; skip turning left
-    call GetTurnSpeed                       ; EAX = degrees this frame
-    neg  eax                                ; left = negative
-    INVOKE TurnPlayer, eax                  ; turn left
+    INVOKE KeyDown, 'A'
+    cmp  eax, 0
+    je   CheckD
+    call GetTurnSpeed
+    neg  eax
+    INVOKE TurnPlayer, eax
 CheckD:
-    INVOKE KeyDown, 'D'                     ; D held?
-    cmp  eax, 0                             ; 0 = not held
-    je   CheckW                             ; skip turning right
-    call GetTurnSpeed                       ; EAX = degrees this frame
-    INVOKE TurnPlayer, eax                  ; turn right
+    INVOKE KeyDown, 'D'
+    cmp  eax, 0
+    je   CheckW
+    call GetTurnSpeed
+    INVOKE TurnPlayer, eax
 CheckW:
-    INVOKE KeyDown, 'W'                     ; W held?
-    cmp  eax, 0                             ; 0 = not held
-    je   CheckS                             ; skip moving forward
-    call GetMoveDelta                       ; EAX = dx, EDX = dy
-    INVOKE TryMove, eax, edx                ; move forward if possible
-    call CenterAssist                       ; drift towards the corridor centre
+    INVOKE KeyDown, 'W'
+    cmp  eax, 0
+    je   CheckS
+    call GetMoveDelta
+    INVOKE TryMove, eax, edx
+    call CenterAssist
 CheckS:
-    INVOKE KeyDown, 'S'                     ; S held?
-    cmp  eax, 0                             ; 0 = not held
-    je   CheckM                             ; skip moving back
-    call GetMoveDelta                       ; EAX = dx, EDX = dy
-    neg  eax                                ; reverse X direction
-    neg  edx                                ; reverse Y direction
-    INVOKE TryMove, eax, edx                ; move backward if possible
-    call CenterAssist                       ; drift towards the corridor centre
+    INVOKE KeyDown, 'S'
+    cmp  eax, 0
+    je   CheckM
+    call GetMoveDelta
+    neg  eax
+    neg  edx
+    INVOKE TryMove, eax, edx
+    call CenterAssist
 CheckM:
-    INVOKE KeyPressed, 'M', ADDR mWasDown   ; M newly pressed?
-    cmp  eax, 0                             ; 0 = no new press
-    je   CheckQ                             ; skip the toggle
-    xor  showMinimap, 1                     ; 1 -> 0 or 0 -> 1
+    INVOKE KeyPressed, 'M', ADDR mWasDown
+    cmp  eax, 0
+    je   CheckQ
+    xor  showMinimap, 1
 CheckQ:
-    INVOKE KeyPressed, 'Q', ADDR qWasDown   ; Q newly pressed?
-    cmp  eax, 0                             ; 0 = no new press
-    je   InputDone                          ; keep playing
-    mov  quitFlag, 1                        ; tell the game loop to stop
+    INVOKE KeyPressed, 'Q', ADDR qWasDown
+    cmp  eax, 0
+    je   InputDone
+    mov  quitFlag, 1
 InputDone:
-    ret                                     ; back to caller
+    ret
 HandleInput ENDP
 
-;-------------------------------------------------------------
-; GetArrowChar
-; Purpose:   Pick the minimap arrow for the player's angle,
-;            using 90-degree ranges centred on each direction.
-;            315..44 -> '>'   45..134 -> 'v'
-;            135..224 -> '<'  225..314 -> '^'
-; Receives:  angle (global, 0..359)
-; Returns:   EAX = arrow character (in AL)
-; Registers: EAX only
-;-------------------------------------------------------------
+; Minimap arrow for the player's direction
 GetArrowChar PROC
-    mov  eax, angle                         ; EAX = current angle
-    cmp  eax, 45                            ; below 45?
-    jb   ArrowRight                         ; yes: facing east
-    cmp  eax, 135                           ; below 135?
-    jb   ArrowDown                          ; yes: facing south (screen down)
-    cmp  eax, 225                           ; below 225?
-    jb   ArrowLeft                          ; yes: facing west
-    cmp  eax, 315                           ; below 315?
-    jb   ArrowUp                            ; yes: facing north (screen up)
+    mov  eax, angle
+    cmp  eax, 45
+    jb   ArrowRight
+    cmp  eax, 135
+    jb   ArrowDown
+    cmp  eax, 225
+    jb   ArrowLeft
+    cmp  eax, 315
+    jb   ArrowUp
 ArrowRight:
-    mov  eax, '>'                           ; 315..359 or 0..44
-    ret                                     ; back to caller
+    mov  eax, '>'
+    ret
 ArrowDown:
-    mov  eax, 'v'                           ; 45..134
-    ret                                     ; back to caller
+    mov  eax, 'v'
+    ret
 ArrowLeft:
-    mov  eax, '<'                           ; 135..224
-    ret                                     ; back to caller
+    mov  eax, '<'
+    ret
 ArrowUp:
-    mov  eax, '^'                           ; 225..314
-    ret                                     ; back to caller
+    mov  eax, '^'
+    ret
 GetArrowChar ENDP
 
-;-------------------------------------------------------------
-; PutCell
-; Purpose:   Write one character and its colour into the frame
-;            (frameBuffer and attrBuffer) at (row, col).
-; Receives:  row, col  = screen position (row 0..24, col 0..79)
-;            cellChar  = character (low byte used)
-;            cellAttr  = colour attribute (low word used)
-; Returns:   nothing (frameBuffer, attrBuffer changed)
-; Registers: none (EAX, EBX saved by USES)
-;-------------------------------------------------------------
+; Write one character and colour into the text overlay
 PutCell PROC USES eax ebx, row:DWORD, col:DWORD, cellChar:DWORD, cellAttr:DWORD
-    mov  eax, row                           ; EAX = row
-    imul eax, SCREEN_W                      ; EAX = row * 80
-    add  eax, col                           ; EAX = row*80 + col = cell number
-    mov  ebx, cellChar                      ; BL = character
-    mov  frameBuffer[eax], bl               ; store it (indexed addressing)
-    mov  ebx, cellAttr                      ; BX = colour
-    mov  attrBuffer[eax*2], bx              ; store it (scaled index: 2 bytes per colour)
-    ret                                     ; back to caller
+    mov  eax, row
+    imul eax, SCREEN_W
+    add  eax, col
+    mov  ebx, cellChar
+    mov  frameBuffer[eax], bl
+    mov  ebx, cellAttr
+    mov  attrBuffer[eax*2], bx
+    ret
 PutCell ENDP
 
-;-------------------------------------------------------------
-; GetMapLook
-; Purpose:   Choose how one map cell looks on the minimap.
-;            '#' -> blue-gray block, 'E' -> orange E,
-;            'K' -> gold K, anything else -> dark space.
-; Receives:  EAX = map character (in AL)
-; Returns:   EAX = screen character, EBX = colour attribute
-; Registers: EAX, EBX
-;-------------------------------------------------------------
+; Minimap character and colour for a map cell
 GetMapLook PROC
-    cmp  al, '#'                            ; brick wall?
-    je   LookWall                           ; yes
-    cmp  al, '%'                            ; stone wall?
-    je   LookStone                          ; yes
-    cmp  al, 'E'                            ; exit?
-    je   LookExit                           ; yes
-    cmp  al, 'K'                            ; key?
-    je   LookKey                            ; yes
-    mov  eax, ' '                           ; floor: empty
-    mov  ebx, DEFAULT_ATTR                  ; on the dark background
-    ret                                     ; back to caller
+    cmp  al, '#'
+    je   LookWall
+    cmp  al, '%'
+    je   LookStone
+    cmp  al, 'E'
+    je   LookExit
+    cmp  al, 'K'
+    je   LookKey
+    mov  eax, ' '
+    mov  ebx, DEFAULT_ATTR
+    ret
 LookWall:
-    mov  eax, WALL_CHAR                     ; solid block
-    mov  ebx, MAP_WALL_ATTR                 ; blue-gray
-    ret                                     ; back to caller
+    mov  eax, WALL_CHAR
+    mov  ebx, MAP_WALL_ATTR
+    ret
 LookStone:
-    mov  eax, WALL_CHAR                     ; solid block
-    mov  ebx, MAP_STONE_ATTR                ; grey-violet
-    ret                                     ; back to caller
+    mov  eax, WALL_CHAR
+    mov  ebx, MAP_STONE_ATTR
+    ret
 LookExit:
-    mov  eax, 'E'                           ; letter E
-    mov  ebx, MAP_EXIT_ATTR                 ; orange
-    ret                                     ; back to caller
+    mov  eax, 'E'
+    mov  ebx, MAP_EXIT_ATTR
+    ret
 LookKey:
-    mov  eax, 'K'                           ; letter K
-    mov  ebx, MAP_KEY_ATTR                  ; gold
-    ret                                     ; back to caller
+    mov  eax, 'K'
+    mov  ebx, MAP_KEY_ATTR
+    ret
 GetMapLook ENDP
 
-;-------------------------------------------------------------
-; DrawMapBorder
-; Purpose:   Draw a single-line box around the minimap:
-;            rows 0 and 17, columns 0 and 17 of the screen.
-; Receives:  nothing
-; Returns:   nothing (frameBuffer, attrBuffer changed)
-; Registers: none (ECX saved by USES)
-;-------------------------------------------------------------
+; Draw the border around the minimap
 DrawMapBorder PROC USES ecx
-    INVOKE PutCell, 0, 0, BOX_TL, BORDER_ATTR             ; top-left corner
-    INVOKE PutCell, 0, MAP_BOX, BOX_TR, BORDER_ATTR       ; top-right corner
-    INVOKE PutCell, MAP_BOX, 0, BOX_BL, BORDER_ATTR       ; bottom-left corner
-    INVOKE PutCell, MAP_BOX, MAP_BOX, BOX_BR, BORDER_ATTR ; bottom-right corner
-    mov  ecx, 1                             ; ECX = 1..16 along each side
+    INVOKE PutCell, 0, 0, BOX_TL, BORDER_ATTR
+    INVOKE PutCell, 0, MAP_BOX, BOX_TR, BORDER_ATTR
+    INVOKE PutCell, MAP_BOX, 0, BOX_BL, BORDER_ATTR
+    INVOKE PutCell, MAP_BOX, MAP_BOX, BOX_BR, BORDER_ATTR
+    mov  ecx, 1
 BorderLoop:
-    INVOKE PutCell, 0, ecx, BOX_H, BORDER_ATTR       ; top edge
-    INVOKE PutCell, MAP_BOX, ecx, BOX_H, BORDER_ATTR ; bottom edge
-    INVOKE PutCell, ecx, 0, BOX_V, BORDER_ATTR       ; left edge
-    INVOKE PutCell, ecx, MAP_BOX, BOX_V, BORDER_ATTR ; right edge
-    inc  ecx                                ; next position
-    cmp  ecx, MAP_BOX                       ; done 1..16?
-    jb   BorderLoop                         ; no: continue
-    ret                                     ; back to caller
+    INVOKE PutCell, 0, ecx, BOX_H, BORDER_ATTR
+    INVOKE PutCell, MAP_BOX, ecx, BOX_H, BORDER_ATTR
+    INVOKE PutCell, ecx, 0, BOX_V, BORDER_ATTR
+    INVOKE PutCell, ecx, MAP_BOX, BOX_V, BORDER_ATTR
+    inc  ecx
+    cmp  ecx, MAP_BOX
+    jb   BorderLoop
+    ret
 DrawMapBorder ENDP
 
-;-------------------------------------------------------------
-; DrawMinimap
-; Purpose:   If showMinimap = 1, draw the 16x16 map in colour
-;            inside a border at the top-left of the frame, and a
-;            gold direction arrow on the player's cell.
-;            Map cell (r, c) goes to screen (r+1, c+1).
-; Receives:  nothing (uses gameMap, posX, posY)
-; Returns:   nothing (frameBuffer, attrBuffer changed)
-; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Draw the coloured minimap and player arrow
 DrawMinimap PROC USES eax ebx ecx edx esi edi
-    cmp  showMinimap, 0                     ; is the minimap hidden?
-    je   MapDone                            ; yes: draw nothing
-    call DrawMapBorder                      ; the box around the map
-    mov  edx, 0                             ; EDX = map row
+    cmp  showMinimap, 0
+    je   MapDone
+    call DrawMapBorder
+    mov  edx, 0
 MapRow:
-    mov  ecx, 0                             ; ECX = map column
+    mov  ecx, 0
 MapCol:
-    mov  eax, edx                           ; EAX = row
-    shl  eax, 4                             ; row * 16
-    add  eax, ecx                           ; row*16 + col
-    movzx eax, gameMap[eax]                 ; AL = map character
-    call GetMapLook                         ; EAX = screen char, EBX = colour
-    mov  esi, edx                           ; ESI = row
-    inc  esi                                ; +1 for the border
-    mov  edi, ecx                           ; EDI = column
-    inc  edi                                ; +1 for the border
-    INVOKE PutCell, esi, edi, eax, ebx      ; draw the cell
-    inc  ecx                                ; next column
-    cmp  ecx, MAP_W                         ; all 16 columns?
-    jb   MapCol                             ; no: continue
-    inc  edx                                ; next row
-    cmp  edx, MAP_H                         ; all 16 rows?
-    jb   MapRow                             ; no: continue
-    mov  esi, posY                          ; ESI = Y in Q8
-    sar  esi, 8                             ; player row
-    inc  esi                                ; +1 for the border
-    mov  edi, posX                          ; EDI = X in Q8
-    sar  edi, 8                             ; player column
-    inc  edi                                ; +1 for the border
-    call GetArrowChar                       ; EAX = arrow for the facing direction
-    INVOKE PutCell, esi, edi, eax, PLAYER_ATTR ; gold arrow
+    mov  eax, edx
+    shl  eax, 4
+    add  eax, ecx
+    movzx eax, gameMap[eax]
+    call GetMapLook
+    mov  esi, edx
+    inc  esi
+    mov  edi, ecx
+    inc  edi
+    INVOKE PutCell, esi, edi, eax, ebx
+    inc  ecx
+    cmp  ecx, MAP_W
+    jb   MapCol
+    inc  edx
+    cmp  edx, MAP_H
+    jb   MapRow
+    mov  esi, posY
+    sar  esi, 8
+    inc  esi
+    mov  edi, posX
+    sar  edi, 8
+    inc  edi
+    call GetArrowChar
+    INVOKE PutCell, esi, edi, eax, PLAYER_ATTR
 MapDone:
-    ret                                     ; back to caller
+    ret
 DrawMinimap ENDP
 
-;-------------------------------------------------------------
-; SetupAxis
-; Purpose:   DDA setup for ONE axis (call once for X, once
-;            for Y). All values are Q8.
-;            deltaDist = ray length to cross one whole cell
-;                        on this axis = 256*256 / |dir|
-;            step      = +1 or -1 (which way we move in cells)
-;            sideDist  = ray length from the player to the
-;                        FIRST grid line on this axis
-; Receives:  axisPos = player position on this axis (Q8)
-;            axisDir = ray direction on this axis (cos or
-;                      sin value, -256..256)
-; Returns:   EAX = deltaDist, EBX = sideDist, ECX = step
-; Registers: EAX, EBX, ECX (EDX, ESI saved by USES)
-;-------------------------------------------------------------
+; DDA setup for one axis: step, deltaDist, sideDist
 SetupAxis PROC USES edx esi, axisPos:SDWORD, axisDir:SDWORD
-    mov  esi, axisDir                       ; ESI = direction on this axis
-    cmp  esi, 0                             ; ray exactly parallel to this axis?
-    jne  DirNotZero                         ; no: normal case
-    mov  eax, BIG_DIST                      ; never crosses a line: "infinite" deltaDist
-    mov  ebx, BIG_DIST                      ; and the first line is "infinitely" far
-    mov  ecx, 1                             ; step not used, any value is fine
-    ret                                     ; back to caller (no divide by zero)
+    mov  esi, axisDir
+    cmp  esi, 0
+    jne  DirNotZero
+    mov  eax, BIG_DIST
+    mov  ebx, BIG_DIST
+    mov  ecx, 1
+    ret
 DirNotZero:
-    mov  ecx, 1                             ; assume moving + (right / down)
-    cmp  esi, 0                             ; is the direction negative?
-    jg   DirPositive                        ; no: keep step = +1
-    neg  esi                                ; ESI = |dir|
-    mov  ecx, -1                            ; moving - (left / up)
+    mov  ecx, 1
+    cmp  esi, 0
+    jg   DirPositive
+    neg  esi
+    mov  ecx, -1
 DirPositive:
-    mov  eax, 65536                         ; 256 * 256 (1.0 in Q8, divided by a Q8 number)
-    mov  edx, 0                             ; clear EDX before DIV
-    div  esi                                ; EAX = deltaDist = 65536 / |dir|
-    mov  edx, axisPos                       ; EDX = position in Q8
-    and  edx, 255                           ; EDX = how far into the current cell (0..255)
-    cmp  ecx, 1                             ; moving + ?
-    jne  HaveGap                            ; no: gap back to the cell's start = EDX
-    neg  edx                                ; moving +: gap forward = 256 - EDX
-    add  edx, 256                           ; EDX = gap to the next grid line (Q8)
+    mov  eax, 65536
+    mov  edx, 0
+    div  esi
+    mov  edx, axisPos
+    and  edx, 255
+    cmp  ecx, 1
+    jne  HaveGap
+    neg  edx
+    add  edx, 256
 HaveGap:
-    mov  ebx, eax                           ; EBX = deltaDist
-    FIXMUL ebx, edx                         ; EBX = deltaDist * gap / 256 -> sideDist (no overflow)
-    ret                                     ; back to caller
+    mov  ebx, eax
+    FIXMUL ebx, edx
+    ret
 SetupAxis ENDP
 
-;-------------------------------------------------------------
-; CastRay
-; Purpose:   Send one ray from the player and find the
-;            distance to the first wall, using DDA (jump from
-;            grid line to grid line, one cell at a time).
-; Receives:  rayDirX, rayDirY = ray direction (Q8), built
-;            from the camera plane by CastAllRays
-; Returns:   EAX = perpendicular distance to the wall (Q8),
-;            at least 1 (no fisheye correction needed)
-;            EDX = hitSide (0 = hit an X gridline,
-;                           1 = hit a Y gridline)
-;            ECX = HIT_WALL, HIT_EXIT or HIT_KEY (what stopped the ray)
-;            rayCell  = map cell number of the hit (row*16 + col)
-;            rayWallX = where along that wall the ray hit (0..255)
-; Registers: EAX, ECX, EDX (EBX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Cast one ray with DDA and return the distance to the wall
 CastRay PROC USES ebx esi edi, rayDirX:SDWORD, rayDirY:SDWORD
-    LOCAL mapX:SDWORD, mapY:SDWORD          ; the cell the ray is in now
-    LOCAL stepX:SDWORD, stepY:SDWORD        ; +1 or -1 per axis
-    LOCAL deltaX:SDWORD, deltaY:SDWORD      ; ray length to cross one cell, per axis
-    LOCAL sideX:SDWORD, sideY:SDWORD        ; ray length to the next X / Y grid line
-    LOCAL hitSide:DWORD                     ; 0 = last step was in X, 1 = in Y
-    LOCAL hitType:DWORD                     ; what stopped the ray: HIT_WALL / HIT_EXIT / HIT_KEY
+    LOCAL mapX:SDWORD, mapY:SDWORD
+    LOCAL stepX:SDWORD, stepY:SDWORD
+    LOCAL deltaX:SDWORD, deltaY:SDWORD
+    LOCAL sideX:SDWORD, sideY:SDWORD
+    LOCAL hitSide:DWORD
+    LOCAL hitType:DWORD
 
-    mov  hitType, HIT_WALL                  ; assume a normal wall until we know
+    mov  hitType, HIT_WALL
 
-    ; ----- block 1: ray direction (camera plane, from CastAllRays) -----
-    mov  edi, rayDirX                       ; EDI = dirX (Q8, not normalised)
-    mov  esi, rayDirY                       ; ESI = dirY (Q8, not normalised)
+    mov  edi, rayDirX
+    mov  esi, rayDirY
 
-    ; ----- block 2: starting cell and DDA setup per axis -----
-    mov  eax, posX                          ; EAX = player X (Q8)
-    sar  eax, 8                             ; whole cells
-    mov  mapX, eax                          ; start cell column
-    mov  eax, posY                          ; EAX = player Y (Q8)
-    sar  eax, 8                             ; whole cells
-    mov  mapY, eax                          ; start cell row
-    INVOKE SetupAxis, posX, edi             ; X axis: EAX = delta, EBX = side, ECX = step
-    mov  deltaX, eax                        ; save deltaDist X
-    mov  sideX, ebx                         ; save sideDist X
-    mov  stepX, ecx                         ; save step X
-    INVOKE SetupAxis, posY, esi             ; Y axis: same outputs
-    mov  deltaY, eax                        ; save deltaDist Y
-    mov  sideY, ebx                         ; save sideDist Y
-    mov  stepY, ecx                         ; save step Y
+    mov  eax, posX
+    sar  eax, 8
+    mov  mapX, eax
+    mov  eax, posY
+    sar  eax, 8
+    mov  mapY, eax
+    INVOKE SetupAxis, posX, edi
+    mov  deltaX, eax
+    mov  sideX, ebx
+    mov  stepX, ecx
+    INVOKE SetupAxis, posY, esi
+    mov  deltaY, eax
+    mov  sideY, ebx
+    mov  stepY, ecx
 
-    ; ----- block 3: step cell by cell until a wall or the exit -----
-    ; (the map has walls all round, so this always ends;
-    ;  the bounds check is an extra safety net)
 DDALoop:
-    mov  eax, sideX                         ; EAX = distance to next X line
-    cmp  eax, sideY                         ; is the X line closer than the Y line?
-    jge  StepInY                            ; no: the Y line comes first
-    mov  eax, deltaX                        ; yes: cross the X line
-    add  sideX, eax                         ; next X line is one deltaX further
-    mov  eax, stepX                         ; +1 or -1
-    add  mapX, eax                          ; move one cell left/right
-    mov  hitSide, 0                         ; we crossed an X line
-    jmp  CheckCell                          ; look at the new cell
+    mov  eax, sideX
+    cmp  eax, sideY
+    jge  StepInY
+    mov  eax, deltaX
+    add  sideX, eax
+    mov  eax, stepX
+    add  mapX, eax
+    mov  hitSide, 0
+    jmp  CheckCell
 StepInY:
-    mov  eax, deltaY                        ; cross the Y line
-    add  sideY, eax                         ; next Y line is one deltaY further
-    mov  eax, stepY                         ; +1 or -1
-    add  mapY, eax                          ; move one cell up/down
-    mov  hitSide, 1                         ; we crossed a Y line
+    mov  eax, deltaY
+    add  sideY, eax
+    mov  eax, stepY
+    add  mapY, eax
+    mov  hitSide, 1
 CheckCell:
-    cmp  mapX, MAP_W - 1                    ; column outside 0..15? (unsigned check)
-    ja   RayHit                             ; yes: stop, never read past the map
-    cmp  mapY, MAP_H - 1                    ; row outside 0..15? (unsigned check)
-    ja   RayHit                             ; yes: stop, never read past the map
-    mov  eax, mapY                          ; EAX = row
-    shl  eax, 4                             ; row * 16
-    add  eax, mapX                          ; row*16 + col
-    cmp  gameMap[eax], '#'                  ; is this cell a brick wall?
-    je   RayHit                             ; yes: stop
-    cmp  gameMap[eax], '%'                  ; is it a stone wall?
-    je   RayHit                             ; yes: stop
-    cmp  gameMap[eax], 'K'                  ; is it a key?
-    je   RayKey                             ; yes: keys also stop the ray
-    cmp  gameMap[eax], 'E'                  ; is it the exit door?
-    jne  DDALoop                            ; no: keep stepping
-    mov  hitType, HIT_EXIT                  ; yes: the exit also stops the ray
-    jmp  RayHit                             ; go work out the distance
+    cmp  mapX, MAP_W - 1
+    ja   RayHit
+    cmp  mapY, MAP_H - 1
+    ja   RayHit
+    mov  eax, mapY
+    shl  eax, 4
+    add  eax, mapX
+    cmp  gameMap[eax], '#'
+    je   RayHit
+    cmp  gameMap[eax], '%'
+    je   RayHit
+    cmp  gameMap[eax], 'K'
+    je   RayKey
+    cmp  gameMap[eax], 'E'
+    jne  DDALoop
+    mov  hitType, HIT_EXIT
+    jmp  RayHit
 RayKey:
-    mov  hitType, HIT_KEY                   ; the ray stopped on a key
+    mov  hitType, HIT_KEY
 RayHit:
 
-    ; ----- block 4: distance along the ray to the wall -----
-    ; sideX/sideY is already one cell past the hit line,
-    ; so take one delta back off.
-    cmp  hitSide, 0                         ; hit on an X line?
-    jne  HitOnY                             ; no: Y line
-    mov  eax, sideX                         ; distance to the X line after the wall
-    sub  eax, deltaX                        ; minus one cell = distance to the wall
-    jmp  HaveRayDist                        ; done
+    cmp  hitSide, 0
+    jne  HitOnY
+    mov  eax, sideX
+    sub  eax, deltaX
+    jmp  HaveRayDist
 HitOnY:
-    mov  eax, sideY                         ; distance to the Y line after the wall
-    sub  eax, deltaY                        ; minus one cell = distance to the wall
+    mov  eax, sideY
+    sub  eax, deltaY
 HaveRayDist:
-    mov  ebx, eax                           ; EBX = distance along the ray (Q8)
+    mov  ebx, eax
 
-    ; ----- block 4b: which cell, and where along its wall -----
-    ; wallX = fractional part of the hit point: on an X-side hit
-    ; it runs along Y (posY + dist*dirY), on a Y-side hit along X.
-    mov  eax, mapY                          ; EAX = row of the hit cell
-    shl  eax, 4                             ; row * 16
-    add  eax, mapX                          ; + column = cell number
-    and  eax, 0FFh                          ; keep it 0..255
-    mov  rayCell, eax                       ; report the hit cell
-    mov  eax, ebx                           ; EAX = distance along the ray
-    cmp  hitSide, 0                         ; hit on an X line?
-    jne  WallXFromX                         ; no: Y line
-    FIXMUL eax, esi                         ; EAX = dist * dirY / 256
-    add  eax, posY                          ; hit point Y (Q8)
-    jmp  HaveWallX                          ; done
+    mov  eax, mapY
+    shl  eax, 4
+    add  eax, mapX
+    and  eax, 0FFh
+    mov  rayCell, eax
+    mov  eax, ebx
+    cmp  hitSide, 0
+    jne  WallXFromX
+    FIXMUL eax, esi
+    add  eax, posY
+    jmp  HaveWallX
 WallXFromX:
-    FIXMUL eax, edi                         ; EAX = dist * dirX / 256
-    add  eax, posX                          ; hit point X (Q8)
+    FIXMUL eax, edi
+    add  eax, posX
 HaveWallX:
-    and  eax, 255                           ; fractional part = position along the wall
-    mov  rayWallX, eax                      ; report it
+    and  eax, 255
+    mov  rayWallX, eax
 
-    ; ----- block 5: no fisheye correction needed -----
-    ; With the camera-plane ray (dir + plane * cameraX) the DDA
-    ; distance is already measured straight ahead (perpendicular
-    ; to the camera plane), so walls are not bent.
-    mov  eax, ebx                           ; EAX = perpendicular distance (Q8)
+    mov  eax, ebx
 
-    ; ----- block 6: never return 0 or less (we divide by it later) -----
-    cmp  eax, 1                             ; at least 1?
-    jge  DistOK                             ; yes
-    mov  eax, 1                             ; no: use 1
+    cmp  eax, 1
+    jge  DistOK
+    mov  eax, 1
 DistOK:
-    mov  edx, hitSide                       ; EDX = which kind of gridline we hit
-    mov  ecx, hitType                       ; ECX = what was hit
-    ret                                     ; back to caller (EAX = distance, EDX = side, ECX = hit type)
+    mov  edx, hitSide
+    mov  ecx, hitType
+    ret
 CastRay ENDP
 
-;-------------------------------------------------------------
-; GetWallLevel
-; Purpose:   Pick the wall shade level for a distance. Closer
-;            walls are brighter. Y-side walls use one level
-;            darker so corners and edges show up.
-;            level 0 (near, brightest) .. 3 (far, darkest)
-; Receives:  distance = wall distance (Q8)
-;            side     = hitSide from CastRay (0 or 1)
-; Returns:   EAX = level 0..3 (index into brickColors / stoneColors)
-; Registers: EAX only
-;-------------------------------------------------------------
+; Wall shade level from the distance
 GetWallLevel PROC, distance:DWORD, side:DWORD
-    mov  eax, distance                      ; EAX = distance
-    cmp  eax, shadeDist1                    ; under 2 cells?
-    jb   Level0                             ; yes
-    cmp  eax, shadeDist2                    ; under 4 cells?
-    jb   Level1                             ; yes
-    cmp  eax, shadeDist3                    ; under 8 cells?
-    jb   Level2                             ; yes
-    mov  eax, 3                             ; far: level 3
-    jmp  AddSide                            ; go apply side shading
+    mov  eax, distance
+    cmp  eax, shadeDist1
+    jb   Level0
+    cmp  eax, shadeDist2
+    jb   Level1
+    cmp  eax, shadeDist3
+    jb   Level2
+    mov  eax, 3
+    jmp  AddSide
 Level0:
-    mov  eax, 0                             ; level 0
-    jmp  AddSide                            ; go apply side shading
+    mov  eax, 0
+    jmp  AddSide
 Level1:
-    mov  eax, 1                             ; level 1
-    jmp  AddSide                            ; go apply side shading
+    mov  eax, 1
+    jmp  AddSide
 Level2:
-    mov  eax, 2                             ; level 2
+    mov  eax, 2
 AddSide:
-    add  eax, side                          ; Y-side: one level darker (+1)
-    cmp  eax, 3                             ; past the darkest level?
-    jbe  HaveLevel                          ; no
-    mov  eax, 3                             ; yes: stay at the darkest
+    add  eax, side
+    cmp  eax, 3
+    jbe  HaveLevel
+    mov  eax, 3
 HaveLevel:
-    ret                                     ; back to caller
+    ret
 GetWallLevel ENDP
 
-;-------------------------------------------------------------
-; GetFloorPixel
-; Purpose:   Colour of one floor pixel: a smooth gradient from
-;            the near colour (bottom) to the far colour
-;            (horizon), made from two colours with ordered
-;            dithering in five bands:
-;              band 0: near, 1: 3/4 near, 2: checkerboard,
-;              3: 1/4 near, 4: far
-; Receives:  column = pixel column, ECX = pixel row
-; Returns:   EAX = colour role
-; Registers: EAX (EDX saved by USES)
-;-------------------------------------------------------------
+; Colour of one floor pixel (dithered gradient)
 GetFloorPixel PROC USES edx, column:DWORD
-    mov  eax, PIX_H - 1                     ; EAX = bottom pixel row
-    sub  eax, ecx                           ; EAX = rows above the bottom (0 = nearest)
-    imul eax, FLOOR_BANDS                   ; * 5 bands
-    mov  edx, 0                             ; clear EDX before DIV
-    push ecx                                ; keep the row
-    mov  ecx, HORIZON                       ; divide by the floor height
-    div  ecx                                ; EAX = band 0 (near) .. 4 (far)
-    pop  ecx                                ; ECX = row again
-    mov  edx, column                        ; EDX = x
-    add  edx, ecx                           ; x + y: the dither pattern
-    cmp  eax, 0                             ; band 0?
-    je   FloorNear                          ; all near colour
-    cmp  eax, 1                             ; band 1?
-    jne  FloorBand2                         ; no
-    test edx, 3                             ; (x+y) mod 4 = 0?
-    jz   FloorFar                           ; 1 pixel in 4 far
-    jmp  FloorNear                          ; the rest near
+    mov  eax, PIX_H - 1
+    sub  eax, ecx
+    imul eax, FLOOR_BANDS
+    mov  edx, 0
+    push ecx
+    mov  ecx, HORIZON
+    div  ecx
+    pop  ecx
+    mov  edx, column
+    add  edx, ecx
+    cmp  eax, 0
+    je   FloorNear
+    cmp  eax, 1
+    jne  FloorBand2
+    test edx, 3
+    jz   FloorFar
+    jmp  FloorNear
 FloorBand2:
-    cmp  eax, 2                             ; band 2?
-    jne  FloorBand3                         ; no
-    test edx, 1                             ; checkerboard
-    jz   FloorFar                           ; half far
-    jmp  FloorNear                          ; half near
+    cmp  eax, 2
+    jne  FloorBand3
+    test edx, 1
+    jz   FloorFar
+    jmp  FloorNear
 FloorBand3:
-    cmp  eax, 3                             ; band 3?
-    jne  FloorFar                           ; no: band 4, all far
-    test edx, 3                             ; (x+y) mod 4 = 0?
-    jz   FloorNear                          ; 1 pixel in 4 near
+    cmp  eax, 3
+    jne  FloorFar
+    test edx, 3
+    jz   FloorNear
 FloorFar:
-    mov  eax, C_FLOOR_FAR                   ; far colour
-    ret                                     ; back to caller
+    mov  eax, C_FLOOR_FAR
+    ret
 FloorNear:
-    mov  eax, C_FLOOR_NEAR                  ; near colour
-    ret                                     ; back to caller
+    mov  eax, C_FLOOR_NEAR
+    ret
 GetFloorPixel ENDP
 
-;-------------------------------------------------------------
-; GetWallHeight
-; Purpose:   Turn a distance into the wall height in PIXELS:
-;            height = (PIX_H * 256) / distance
-;            (1 cell away = 256 -> PIX_H pixels). Not limited to
-;            the view: DrawPixelColumn clips it.
-; Receives:  EAX = distance (Q8, at least 1)
-; Returns:   EAX = wall height in pixels (at least 2)
-; Registers: EAX (ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Wall height in pixels from the distance
 GetWallHeight PROC USES ecx edx
-    mov  ecx, eax                           ; ECX = distance
-    mov  eax, PIX_H * 256                   ; EAX = PIX_H in Q8
-    mov  edx, 0                             ; clear EDX before DIV
-    div  ecx                                ; EAX = PIX_H * 256 / distance
-    cmp  eax, 2                             ; at least two pixels?
-    jae  HeightOK                           ; yes
-    mov  eax, 2                             ; no: use 2 (no zero-height walls)
+    mov  ecx, eax
+    mov  eax, PIX_H * 256
+    mov  edx, 0
+    div  ecx
+    cmp  eax, 2
+    jae  HeightOK
+    mov  eax, 2
 HeightOK:
-    ret                                     ; back to caller
+    ret
 GetWallHeight ENDP
 
-;-------------------------------------------------------------
-; DrawPixelColumn
-; Purpose:   Draw one pixel column of the 3D view into pixBuf:
-;            sky (with stars), wall slice, floor. The slice is
-;            symmetric around the horizon:
-;              top    = HORIZON - height/2
-;              bottom = HORIZON + height/2
-;            so the floor edge never jitters between columns.
-;            Rows outside the view are simply not drawn.
-; Receives:  column = pixel column (0..PIX_W-1), uses the
-;            column arrays filled by CastAllRays
-; Returns:   nothing (pixBuf changed)
-; Registers: none (EAX, EBX, ECX, EDX, EDI saved by USES)
-;-------------------------------------------------------------
+; Draw one column of the 3D view: sky, wall, floor
 DrawPixelColumn PROC USES eax ebx ecx edx edi, column:DWORD
-    LOCAL wallTop:SDWORD                    ; first wall pixel row (may be negative)
-    LOCAL wallBottom:SDWORD                 ; first floor pixel row (may be past the view)
-    LOCAL lineH:DWORD                       ; wall height in pixels
-    LOCAL kind:DWORD                        ; KIND_EDGE / KIND_DOOR / KIND_KEY / KIND_BRICK / KIND_STONE
-    LOCAL level:DWORD                       ; distance shade 0 (near) .. 3 (far)
-    LOCAL wallX:DWORD                       ; where along the wall (0..255)
-    LOCAL rayAng:DWORD                      ; ray angle (for the stars)
+    LOCAL wallTop:SDWORD
+    LOCAL wallBottom:SDWORD
+    LOCAL lineH:DWORD
+    LOCAL kind:DWORD
+    LOCAL level:DWORD
+    LOCAL wallX:DWORD
+    LOCAL rayAng:DWORD
 
-    ; ----- block 1: slice position -----
-    mov  ebx, column                        ; EBX = column
-    movzx eax, colAngle[ebx*2]              ; ray angle (WORD array)
-    mov  rayAng, eax                        ; keep it for the stars
-    movzx eax, colWallX[ebx]                ; position along the wall
-    mov  wallX, eax                         ; keep it for the texture
-    mov  eax, colDist[ebx*4]                ; EAX = perpendicular distance
-    cmp  eax, MIN_WALL_DIST                 ; closer than 1/4 cell?
-    jae  DistForHeightOK                    ; no
-    mov  eax, MIN_WALL_DIST                 ; yes: limit, walls never get absurdly tall
+    mov  ebx, column
+    movzx eax, colAngle[ebx*2]
+    mov  rayAng, eax
+    movzx eax, colWallX[ebx]
+    mov  wallX, eax
+    mov  eax, colDist[ebx*4]
+    cmp  eax, MIN_WALL_DIST
+    jae  DistForHeightOK
+    mov  eax, MIN_WALL_DIST
 DistForHeightOK:
-    call GetWallHeight                      ; EAX = height in pixels
-    mov  lineH, eax                         ; keep it
-    sar  eax, 1                             ; half the height
-    mov  edx, HORIZON                       ; EDX = horizon row
-    sub  edx, eax                           ; horizon - half
-    mov  wallTop, edx                       ; top of the slice
-    mov  edx, HORIZON                       ; EDX = horizon row
-    add  edx, eax                           ; horizon + half
-    mov  wallBottom, edx                    ; first floor row
+    call GetWallHeight
+    mov  lineH, eax
+    sar  eax, 1
+    mov  edx, HORIZON
+    sub  edx, eax
+    mov  wallTop, edx
+    mov  edx, HORIZON
+    add  edx, eax
+    mov  wallBottom, edx
 
-    ; ----- block 2: what kind of slice, and its shade -----
-    INVOKE GetColumnKind, ebx               ; EAX = kind of this column
-    mov  kind, eax                          ; keep it
-    movzx eax, hitSideCol[ebx]              ; EAX = side (0 or 1)
-    INVOKE GetWallLevel, colDist[ebx*4], eax ; EAX = shade level 0..3
-    mov  level, eax                         ; keep it
+    INVOKE GetColumnKind, ebx
+    mov  kind, eax
+    movzx eax, hitSideCol[ebx]
+    INVOKE GetWallLevel, colDist[ebx*4], eax
+    mov  level, eax
 
-    ; ----- block 3: the pixels, top to bottom -----
-    mov  edi, OFFSET pixBuf                 ; EDI = pixel row 0
-    add  edi, ebx                           ; this column
-    mov  ecx, 0                             ; ECX = pixel row
+    mov  edi, OFFSET pixBuf
+    add  edi, ebx
+    mov  ecx, 0
 PixelRow:
-    cmp  ecx, wallTop                       ; above the wall? (signed: top can be < 0)
-    jl   PixSky                             ; yes: sky
-    cmp  ecx, wallBottom                    ; inside the wall? (signed)
-    jl   PixWall                            ; yes: wall
-    mov  edx, wallBottom                    ; EDX = first floor row
-    add  edx, FLOOR_SHADOW                  ; + 2 rows of shadow under the wall
-    cmp  ecx, edx                           ; inside the shadow? (signed)
-    jge  PixFloor                           ; no: normal floor
-    mov  eax, SHADOW_ATTR                   ; yes: darker floor under the wall
-    jmp  PixStore                           ; store it
+    cmp  ecx, wallTop
+    jl   PixSky
+    cmp  ecx, wallBottom
+    jl   PixWall
+    mov  edx, wallBottom
+    add  edx, FLOOR_SHADOW
+    cmp  ecx, edx
+    jge  PixFloor
+    mov  eax, SHADOW_ATTR
+    jmp  PixStore
 PixFloor:
-    INVOKE GetFloorPixel, ebx               ; floor: EAX = colour for (column, row ECX)
-    jmp  PixStore                           ; store it
+    INVOKE GetFloorPixel, ebx
+    jmp  PixStore
 PixSky:
-    mov  eax, C_SKY                         ; dark sky
-    INVOKE IsStar, rayAng                   ; EAX = 1 if a star belongs here
-    cmp  eax, 0                             ; star?
-    mov  eax, C_SKY                         ; (MOV keeps the flags) sky colour
-    je   PixStore                           ; no star: sky
-    mov  eax, STAR_ATTR                     ; star colour
-    jmp  PixStore                           ; store it
+    mov  eax, C_SKY
+    INVOKE IsStar, rayAng
+    cmp  eax, 0
+    mov  eax, C_SKY
+    je   PixStore
+    mov  eax, STAR_ATTR
+    jmp  PixStore
 PixWall:
-    mov  edx, ecx                           ; EDX = pixel row
-    sub  edx, wallTop                       ; EDX = row inside the slice (0 = top)
-    INVOKE GetWallPixel, kind, level, wallX, edx, lineH ; EAX = colour of this wall pixel
+    mov  edx, ecx
+    sub  edx, wallTop
+    INVOKE GetWallPixel, kind, level, wallX, edx, lineH
 PixStore:
-    mov  [edi], al                          ; store the colour role
-    add  edi, PIX_W                         ; next pixel row
-    inc  ecx                                ; next row number
-    cmp  ecx, PIX_H                         ; all rows done?
-    jb   PixelRow                           ; no: continue
-    ret                                     ; back to caller
+    mov  [edi], al
+    add  edi, PIX_W
+    inc  ecx
+    cmp  ecx, PIX_H
+    jb   PixelRow
+    ret
 DrawPixelColumn ENDP
 
-;-------------------------------------------------------------
-; GetColumnKind
-; Purpose:   What a column's wall slice shows:
-;            edge line, exit door, key or plain wall.
-; Receives:  column = pixel column, uses the column arrays
-; Returns:   EAX = KIND_EDGE, KIND_DOOR, KIND_KEY, KIND_BRICK or
-;            KIND_STONE
-; Registers: EAX (EBX saved by USES)
-;-------------------------------------------------------------
+; What a column shows: edge, door, key, brick or stone
 GetColumnKind PROC USES ebx, column:DWORD
-    INVOKE IsEdgeColumn, column             ; EAX = 1 at an edge between walls
-    cmp  eax, 0                             ; edge?
-    mov  eax, KIND_EDGE                     ; (MOV keeps the flags)
-    jne  KindDone                           ; yes: edge line
-    mov  ebx, column                        ; EBX = column
-    mov  eax, KIND_DOOR                     ; assume the exit door
-    cmp  colType[ebx], HIT_EXIT             ; exit door?
-    je   KindDone                           ; yes
-    mov  eax, KIND_KEY                      ; assume a key
-    cmp  colType[ebx], HIT_KEY              ; key?
-    je   KindDone                           ; yes
-    movzx ebx, hitCellCol[ebx]              ; EBX = map cell that was hit
-    mov  eax, KIND_STONE                    ; assume stone
-    cmp  gameMap[ebx], '%'                  ; stone wall?
-    je   KindDone                           ; yes
-    mov  eax, KIND_BRICK                    ; brick wall
+    INVOKE IsEdgeColumn, column
+    cmp  eax, 0
+    mov  eax, KIND_EDGE
+    jne  KindDone
+    mov  ebx, column
+    mov  eax, KIND_DOOR
+    cmp  colType[ebx], HIT_EXIT
+    je   KindDone
+    mov  eax, KIND_KEY
+    cmp  colType[ebx], HIT_KEY
+    je   KindDone
+    movzx ebx, hitCellCol[ebx]
+    mov  eax, KIND_STONE
+    cmp  gameMap[ebx], '%'
+    je   KindDone
+    mov  eax, KIND_BRICK
 KindDone:
-    ret                                     ; back to caller
+    ret
 GetColumnKind ENDP
 
-;-------------------------------------------------------------
-; GetWallPixel
-; Purpose:   Colour of one pixel of a wall slice.
-;            edge     -> darkest colour (1-pixel line)
-;            any slice: first and last row -> dark outline
-;            door/key -> blinking colour
-;            brick    -> texY = texRow * 32 / lineH (0..31):
-;                        mortar row where texY mod 8 = 0,
-;                        joint where (wallX + shift) mod 64 < 6,
-;                        shift = 32 on odd brick rows,
-;                        mortar two shades darker than the brick
-;            light    -> top quarter one shade lighter, bottom 2
-;                        rows one shade darker (contact shadow)
-;            stone    -> big blocks (16 rows x 128 wide), shift
-;                        64 on odd rows, thin seams two shades
-;                        darker, every second block one shade
-;                        darker (slate look)
-; Receives:  kind, level (0..3), wallX (0..255),
-;            texRow (row inside the slice), lineH (pixels)
-; Returns:   EAX = colour role
-; Registers: EAX (ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Colour of one wall pixel (texture, shade, outline)
 GetWallPixel PROC USES ecx edx, kind:DWORD, level:DWORD, wallX:DWORD, texRow:DWORD, lineH:DWORD
-    cmp  kind, KIND_EDGE                    ; edge line?
-    jne  NotEdgePix                         ; no
-    mov  eax, EDGE_ATTR                     ; yes: darkest colour
-    ret                                     ; back to caller
+    cmp  kind, KIND_EDGE
+    jne  NotEdgePix
+    mov  eax, EDGE_ATTR
+    ret
 NotEdgePix:
-    ; ----- first and last row: outline -----
-    cmp  texRow, 0                          ; first row of the slice?
-    je   OutlinePix                         ; yes
-    mov  eax, lineH                         ; EAX = height
-    dec  eax                                ; last row number
-    cmp  texRow, eax                        ; last row of the slice?
-    je   OutlinePix                         ; yes
-    cmp  kind, KIND_DOOR                    ; door?
-    je   DoorPix                            ; yes
-    cmp  kind, KIND_KEY                     ; key?
-    je   KeyPix                             ; yes
-    ; ----- light: top quarter one shade lighter, bottom 2 rows one darker -----
-    mov  edx, lineH                         ; EDX = height
-    shr  edx, 2                             ; a quarter of the height
-    cmp  texRow, edx                        ; in the top quarter?
-    jae  NotTopLight                        ; no
-    cmp  level, 0                           ; already the brightest?
-    je   NotTopLight                        ; yes
-    dec  level                              ; one shade lighter (level is our own copy)
+    cmp  texRow, 0
+    je   OutlinePix
+    mov  eax, lineH
+    dec  eax
+    cmp  texRow, eax
+    je   OutlinePix
+    cmp  kind, KIND_DOOR
+    je   DoorPix
+    cmp  kind, KIND_KEY
+    je   KeyPix
+    mov  edx, lineH
+    shr  edx, 2
+    cmp  texRow, edx
+    jae  NotTopLight
+    cmp  level, 0
+    je   NotTopLight
+    dec  level
 NotTopLight:
-    mov  edx, lineH                         ; EDX = height
-    sub  edx, CONTACT_ROWS + 1              ; first of the 2 rows above the outline row
-    cmp  texRow, edx                        ; near the bottom? (signed: EDX can be < 0)
-    jl   NotBottomShade                     ; no
-    cmp  level, 3                           ; already the darkest?
-    jae  NotBottomShade                     ; yes
-    inc  level                              ; one shade darker (contact shadow)
+    mov  edx, lineH
+    sub  edx, CONTACT_ROWS + 1
+    cmp  texRow, edx
+    jl   NotBottomShade
+    cmp  level, 3
+    jae  NotBottomShade
+    inc  level
 NotBottomShade:
-    ; ----- texture row: texY = texRow * 32 / lineH -----
-    mov  eax, texRow                        ; EAX = row inside the slice
-    imul eax, TEX_ROWS                      ; * 32 texture rows
-    mov  edx, 0                             ; clear EDX before DIV
-    div  lineH                              ; EAX = texY (0..31)
-    mov  ecx, eax                           ; ECX = texY
-    cmp  kind, KIND_STONE                   ; stone wall?
-    je   StonePix                           ; yes
-    ; ----- blue brick -----
-    and  eax, BRICK_ROW_H - 1               ; texY mod 8
-    cmp  eax, 0                             ; mortar row?
-    je   BrickMortar                        ; yes
-    mov  eax, 0                             ; EAX = shift, 0 on even brick rows
-    test ecx, BRICK_ROW_H                   ; odd brick row? (bit 3 of texY)
-    jz   HaveBrickShift                     ; no
-    mov  eax, BRICK_SHIFT                   ; yes: joints move by half a brick
+    mov  eax, texRow
+    imul eax, TEX_ROWS
+    mov  edx, 0
+    div  lineH
+    mov  ecx, eax
+    cmp  kind, KIND_STONE
+    je   StonePix
+    and  eax, BRICK_ROW_H - 1
+    cmp  eax, 0
+    je   BrickMortar
+    mov  eax, 0
+    test ecx, BRICK_ROW_H
+    jz   HaveBrickShift
+    mov  eax, BRICK_SHIFT
 HaveBrickShift:
-    add  eax, wallX                         ; wallX + shift
-    and  eax, BRICK_W - 1                   ; mod 64
-    cmp  eax, JOINT_W                       ; inside a joint?
-    jb   BrickMortar                        ; yes
-    mov  eax, level                         ; EAX = shade level
-    movzx eax, brickColors[eax]             ; brick colour
-    ret                                     ; back to caller
+    add  eax, wallX
+    and  eax, BRICK_W - 1
+    cmp  eax, JOINT_W
+    jb   BrickMortar
+    mov  eax, level
+    movzx eax, brickColors[eax]
+    ret
 BrickMortar:
-    mov  eax, level                         ; EAX = shade level
-    movzx eax, brickColors[eax + 2]         ; two shades darker
-    ret                                     ; back to caller
-    ; ----- slate stone -----
+    mov  eax, level
+    movzx eax, brickColors[eax + 2]
+    ret
 StonePix:
-    and  eax, STONE_ROW_H - 1               ; texY mod 16
-    cmp  eax, 0                             ; seam row?
-    je   StoneSeam                          ; yes
-    mov  eax, 0                             ; EAX = shift, 0 on even block rows
-    test ecx, STONE_ROW_H                   ; odd block row? (bit 4 of texY)
-    jz   HaveStoneShift                     ; no
-    mov  eax, STONE_SHIFT                   ; yes: seams move by half a block
+    and  eax, STONE_ROW_H - 1
+    cmp  eax, 0
+    je   StoneSeam
+    mov  eax, 0
+    test ecx, STONE_ROW_H
+    jz   HaveStoneShift
+    mov  eax, STONE_SHIFT
 HaveStoneShift:
-    add  eax, wallX                         ; wallX + shift (0..319)
-    mov  edx, eax                           ; EDX = shifted position
-    and  eax, STONE_W - 1                   ; mod 128
-    cmp  eax, SEAM_W                        ; inside a seam?
-    jb   StoneSeam                          ; yes
-    shr  edx, 7                             ; EDX = block number along the row
-    shr  ecx, 4                             ; ECX = block row number
-    add  edx, ecx                           ; block column + block row
-    and  edx, 1                             ; every second block ...
-    mov  eax, level                         ; EAX = shade level
-    add  eax, edx                           ; ... one shade darker
-    cmp  eax, 3                             ; past the farthest shade?
-    jbe  StoneShadeOK                       ; no
-    mov  eax, 3                             ; yes: farthest stone shade
+    add  eax, wallX
+    mov  edx, eax
+    and  eax, STONE_W - 1
+    cmp  eax, SEAM_W
+    jb   StoneSeam
+    shr  edx, 7
+    shr  ecx, 4
+    add  edx, ecx
+    and  edx, 1
+    mov  eax, level
+    add  eax, edx
+    cmp  eax, 3
+    jbe  StoneShadeOK
+    mov  eax, 3
 StoneShadeOK:
-    movzx eax, stoneColors[eax]             ; stone colour
-    ret                                     ; back to caller
+    movzx eax, stoneColors[eax]
+    ret
 StoneSeam:
-    mov  eax, level                         ; EAX = shade level
-    movzx eax, stoneColors[eax + 2]         ; two shades darker
-    ret                                     ; back to caller
+    mov  eax, level
+    movzx eax, stoneColors[eax + 2]
+    ret
 OutlinePix:
-    mov  eax, OUTLINE_ATTR                  ; dark outline
-    ret                                     ; back to caller
+    mov  eax, OUTLINE_ATTR
+    ret
 DoorPix:
-    mov  eax, DOOR_COLOR_A                  ; door colour 1
-    cmp  blinkOn, 0                         ; first half of the blink?
-    je   PixDone                            ; yes
-    mov  eax, DOOR_COLOR_B                  ; no: door colour 2
-    ret                                     ; back to caller
+    mov  eax, DOOR_COLOR_A
+    cmp  blinkOn, 0
+    je   PixDone
+    mov  eax, DOOR_COLOR_B
+    ret
 KeyPix:
-    mov  eax, KEY_COLOR_A                   ; key colour 1
-    cmp  blinkOn, 0                         ; first half of the blink?
-    je   PixDone                            ; yes
-    mov  eax, KEY_COLOR_B                   ; no: key colour 2
+    mov  eax, KEY_COLOR_A
+    cmp  blinkOn, 0
+    je   PixDone
+    mov  eax, KEY_COLOR_B
 PixDone:
-    ret                                     ; back to caller
+    ret
 GetWallPixel ENDP
 
-;-------------------------------------------------------------
-; UpdateBlink
-; Purpose:   Set blinkOn from the clock: (ms / 500) AND 1, so it
-;            is 0 for 500 ms, then 1 for 500 ms, and so on.
-; Receives:  nothing
-; Returns:   blinkOn = 0 or 1
-; Registers: none (EAX, ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Blink state from the clock (every 500 ms)
 UpdateBlink PROC USES eax ecx edx
-    call GetMseconds                        ; EAX = milliseconds since midnight
-    mov  edx, 0                             ; clear EDX before DIV
-    mov  ecx, BLINK_MS                      ; divide by 500
-    div  ecx                                ; EAX = number of half seconds
-    and  eax, 1                             ; keep only the lowest bit: 0 or 1
-    mov  blinkOn, eax                       ; save the blink phase
-    ret                                     ; back to caller
+    call GetMseconds
+    mov  edx, 0
+    mov  ecx, BLINK_MS
+    div  ecx
+    and  eax, 1
+    mov  blinkOn, eax
+    ret
 UpdateBlink ENDP
 
-;-------------------------------------------------------------
-; IsStar
-; Purpose:   Decide if a ceiling cell shows a star. Stars are
-;            tied to the ray angle, so they move with the view:
-;            star if (rayAngle*7 + row*13) mod 37 = 0.
-; Receives:  rayAngle = ray angle (0..359), ECX = row (0..23)
-; Returns:   EAX = 1 for a star, 0 for empty sky
-; Registers: EAX (EBX, EDX saved by USES)
-;-------------------------------------------------------------
+; Is this sky pixel a star
 IsStar PROC USES ebx edx, rayAngle:DWORD
-    mov  eax, rayAngle                      ; EAX = ray angle
-    imul eax, 7                             ; EAX = rayAngle * 7
-    mov  ebx, ecx                           ; EBX = row
-    imul ebx, 13                            ; EBX = row * 13
-    add  eax, ebx                           ; EAX = rayAngle*7 + row*13 (always positive)
-    mov  edx, 0                             ; clear EDX before DIV
-    mov  ebx, STAR_MOD                      ; divide by 37
-    div  ebx                                ; EDX = remainder (mod 37)
-    mov  eax, 0                             ; assume no star
-    cmp  edx, 0                             ; remainder 0?
-    jne  StarDone                           ; no: empty sky
-    mov  eax, 1                             ; yes: a star
+    mov  eax, rayAngle
+    imul eax, 7
+    mov  ebx, ecx
+    imul ebx, 13
+    add  eax, ebx
+    mov  edx, 0
+    mov  ebx, STAR_MOD
+    div  ebx
+    mov  eax, 0
+    cmp  edx, 0
+    jne  StarDone
+    mov  eax, 1
 StarDone:
-    ret                                     ; back to caller
+    ret
 IsStar ENDP
 
-;-------------------------------------------------------------
-; CastAllRays
-; Purpose:   Pass 1 of the 3D view: cast one ray per screen
-;            column and store the results in the column arrays
-;            (colAngle, colDist, hitSideCol, colType,
-;            hitCellCol, colWallX).
-;            Camera-plane method (every column gets its own ray):
-;              dir     = (cos, sin)                 Q8
-;              plane   = (-sin, cos) * tan(30)      148/256
-;              cameraX = (2x - 79) * 256 / 79       -256..256
-;              rayDir  = dir + plane * cameraX
-;            colAngle (only used for the stars) is still
-;            angle - FOV/2 + x*FOV/SCREEN_W.
-; Receives:  nothing (uses angle, posX, posY)
-; Returns:   column arrays filled
-; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Cast one ray per screen column and store the results
 CastAllRays PROC USES eax ebx ecx edx esi edi
-    LOCAL dirX:SDWORD, dirY:SDWORD          ; facing direction (Q8)
-    LOCAL planeX:SDWORD, planeY:SDWORD      ; camera plane (Q8)
-    mov  eax, angle                         ; EAX = facing angle
-    call GetCos                             ; EAX = cos * 256
-    mov  dirX, eax                          ; dirX = cos
-    mov  planeY, eax                        ; planeY = cos (scaled below)
-    mov  eax, angle                         ; EAX = facing angle
-    call GetSin                             ; EAX = sin * 256
-    mov  dirY, eax                          ; dirY = sin
-    neg  eax                                ; EAX = -sin
-    FIXMUL eax, PLANE_LEN                   ; EAX = -sin * tan(30)
-    mov  planeX, eax                        ; planeX
-    mov  eax, planeY                        ; EAX = cos
-    FIXMUL eax, PLANE_LEN                   ; EAX = cos * tan(30)
-    mov  planeY, eax                        ; planeY
-    mov  ebx, 0                             ; EBX = column x, start at 0
+    LOCAL dirX:SDWORD, dirY:SDWORD
+    LOCAL planeX:SDWORD, planeY:SDWORD
+    mov  eax, angle
+    call GetCos
+    mov  dirX, eax
+    mov  planeY, eax
+    mov  eax, angle
+    call GetSin
+    mov  dirY, eax
+    neg  eax
+    FIXMUL eax, PLANE_LEN
+    mov  planeX, eax
+    mov  eax, planeY
+    FIXMUL eax, PLANE_LEN
+    mov  planeY, eax
+    mov  ebx, 0
 CastColumn:
-    ; cameraX = (2x - 79) * 256 / 79  (signed)
-    mov  eax, ebx                           ; EAX = x
-    shl  eax, 1                             ; 2x
-    sub  eax, SCREEN_W - 1                  ; 2x - 79 (-79..79)
-    shl  eax, 8                             ; * 256 (SHL also works for negative numbers)
-    cdq                                     ; sign-extend EAX into EDX before IDIV
-    mov  ecx, SCREEN_W - 1                  ; divide by 79
-    idiv ecx                                ; EAX = cameraX (Q8, -256..256)
-    mov  ecx, eax                           ; ECX = cameraX
-    mov  edi, planeX                        ; EDI = planeX
-    FIXMUL edi, ecx                         ; planeX * cameraX
-    add  edi, dirX                          ; EDI = rayDirX
-    mov  esi, planeY                        ; ESI = planeY
-    FIXMUL esi, ecx                         ; planeY * cameraX
-    add  esi, dirY                          ; ESI = rayDirY
-    mov  eax, ebx                           ; EAX = x
-    imul eax, FOV                           ; EAX = x * 60
-    mov  edx, 0                             ; clear EDX before DIV (x*60 is positive)
-    mov  ecx, SCREEN_W                      ; divide by 80
-    div  ecx                                ; EAX = x * 60 / 80 (0..59 degrees)
-    add  eax, angle                         ; + player angle
-    sub  eax, FOV / 2                       ; - 30: start at the left edge of the view
-    call WrapAngle                          ; keep it 0..359
-    mov  colAngle[ebx*2], ax                ; store the angle for the stars (WORD, scaled index)
-    INVOKE CastRay, edi, esi                ; EAX = distance, EDX = hitSide, ECX = hit type
-    mov  colDist[ebx*4], eax                ; store the distance (DWORD, scaled index)
-    mov  hitSideCol[ebx], dl                ; store the side
-    mov  colType[ebx], cl                   ; store what was hit
-    mov  eax, rayCell                       ; EAX = map cell number of the hit
-    mov  hitCellCol[ebx], al                ; store it
-    mov  eax, rayWallX                      ; EAX = where along the wall (0..255)
-    mov  colWallX[ebx], al                  ; store it
-    inc  ebx                                ; next column
-    cmp  ebx, SCREEN_W                      ; all 80 columns done?
-    jb   CastColumn                         ; no: next column
-    ret                                     ; back to caller
+    mov  eax, ebx
+    shl  eax, 1
+    sub  eax, SCREEN_W - 1
+    shl  eax, 8
+    cdq
+    mov  ecx, SCREEN_W - 1
+    idiv ecx
+    mov  ecx, eax
+    mov  edi, planeX
+    FIXMUL edi, ecx
+    add  edi, dirX
+    mov  esi, planeY
+    FIXMUL esi, ecx
+    add  esi, dirY
+    mov  eax, ebx
+    imul eax, FOV
+    mov  edx, 0
+    mov  ecx, SCREEN_W
+    div  ecx
+    add  eax, angle
+    sub  eax, FOV / 2
+    call WrapAngle
+    mov  colAngle[ebx*2], ax
+    INVOKE CastRay, edi, esi
+    mov  colDist[ebx*4], eax
+    mov  hitSideCol[ebx], dl
+    mov  colType[ebx], cl
+    mov  eax, rayCell
+    mov  hitCellCol[ebx], al
+    mov  eax, rayWallX
+    mov  colWallX[ebx], al
+    inc  ebx
+    cmp  ebx, SCREEN_W
+    jb   CastColumn
+    ret
 CastAllRays ENDP
 
-;-------------------------------------------------------------
-; IsEdgeColumn
-; Purpose:   Decide if a pixel column is an edge between walls:
-;            it hit a different map cell than the column to its
-;            left, or a different side of the cell. Edge columns
-;            are drawn as a 1-pixel dark line.
-; Receives:  column = pixel column, uses the column arrays
-; Returns:   EAX = 1 for an edge, 0 if not
-; Registers: EAX (EBX, ESI saved by USES)
-;-------------------------------------------------------------
+; Is this column an edge between two walls
 IsEdgeColumn PROC USES ebx esi, column:DWORD
-    mov  ebx, column                        ; EBX = column
-    cmp  ebx, 0                             ; first column has no left neighbour
-    je   EdgeNo                             ; so it is not an edge
-    mov  esi, OFFSET hitCellCol             ; ESI = base of the cell array
-    mov  al, [esi + ebx]                    ; AL = this column's cell (base-index)
-    cmp  al, [esi + ebx - 1]                ; same cell as the column to the left?
-    jne  EdgeYes                            ; no: a new wall starts here
-    mov  esi, OFFSET hitSideCol             ; ESI = base of the side array
-    mov  al, [esi + ebx]                    ; AL = this column's side
-    cmp  al, [esi + ebx - 1]                ; same side as the column to the left?
-    jne  EdgeYes                            ; no: a corner of the block
+    mov  ebx, column
+    cmp  ebx, 0
+    je   EdgeNo
+    mov  esi, OFFSET hitCellCol
+    mov  al, [esi + ebx]
+    cmp  al, [esi + ebx - 1]
+    jne  EdgeYes
+    mov  esi, OFFSET hitSideCol
+    mov  al, [esi + ebx]
+    cmp  al, [esi + ebx - 1]
+    jne  EdgeYes
 EdgeNo:
-    mov  eax, 0                             ; not an edge
-    ret                                     ; back to caller
+    mov  eax, 0
+    ret
 EdgeYes:
-    mov  eax, 1                             ; edge
-    ret                                     ; back to caller
+    mov  eax, 1
+    ret
 IsEdgeColumn ENDP
 
-;-------------------------------------------------------------
-; RenderView
-; Purpose:   Draw the 3D view in two passes: cast all 80 rays
-;            first (so each column can look at its neighbour
-;            for edges), then draw the 80 columns.
-; Receives:  nothing (uses angle, posX, posY)
-; Returns:   nothing (frameBuffer, attrBuffer filled)
-; Registers: none (EBX saved by USES)
-;-------------------------------------------------------------
+; Draw the 3D view: cast all rays, then draw all columns
 RenderView PROC USES ebx
-    call CastAllRays                        ; pass 1: fill the column arrays
-    mov  ebx, 0                             ; EBX = column x
+    call CastAllRays
+    mov  ebx, 0
 DrawNext:
-    INVOKE DrawPixelColumn, ebx             ; pass 2: draw this pixel column
-    inc  ebx                                ; next column
-    cmp  ebx, PIX_W                         ; all pixel columns done?
-    jb   DrawNext                           ; no: next column
-    ret                                     ; back to caller
+    INVOKE DrawPixelColumn, ebx
+    inc  ebx
+    cmp  ebx, PIX_W
+    jb   DrawNext
+    ret
 RenderView ENDP
 
-;-------------------------------------------------------------
-; ResetGame
-; Purpose:   Get ready for a new game: fresh copy of the map
-;            (keys back in place), player back at the start,
-;            steps and keys 0, flags cleared, timer started.
-; Receives:  nothing
-; Returns:   gameMap, posX, posY, angle, steps, keys, quitFlag,
-;            wonFlag, msgText, startTime set
-; Registers: none (EAX, ECX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Start a new game: restore the map, reset player, keys and timer
 ResetGame PROC USES eax ecx esi edi
-    cld                                     ; copy forwards
-    mov  esi, OFFSET originalMap            ; ESI = the untouched map
-    mov  edi, OFFSET gameMap                ; EDI = the map the game plays on
-    mov  ecx, MAP_W * MAP_H                 ; ECX = 256 bytes
-    rep  movsb                              ; copy [ESI] -> [EDI], 256 times
-    mov  posX, START_X                      ; back to the start cell (X)
-    mov  posY, START_Y                      ; back to the start cell (Y)
-    mov  angle, START_ANGLE                 ; face east again
-    mov  steps, 0                           ; no steps yet
-    mov  quitFlag, 0                        ; not quitting
-    mov  wonFlag, 0                         ; not won yet
-    mov  keys, 0                            ; no keys yet
-    mov  msgText, 0                         ; no HUD message
-    call GetMseconds                        ; EAX = milliseconds since midnight
-    mov  startTime, eax                     ; the timer starts now
-    ret                                     ; back to caller
+    cld
+    mov  esi, OFFSET originalMap
+    mov  edi, OFFSET gameMap
+    mov  ecx, MAP_W * MAP_H
+    rep  movsb
+    mov  posX, START_X
+    mov  posY, START_Y
+    mov  angle, START_ANGLE
+    mov  steps, 0
+    mov  quitFlag, 0
+    mov  wonFlag, 0
+    mov  keys, 0
+    mov  msgText, 0
+    call GetMseconds
+    mov  startTime, eax
+    ret
 ResetGame ENDP
 
-;-------------------------------------------------------------
-; GetElapsedSec
-; Purpose:   How many whole seconds since the game started.
-; Receives:  nothing (uses startTime)
-; Returns:   EAX = elapsed seconds
-; Registers: EAX (ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Seconds since the game started
 GetElapsedSec PROC USES ecx edx
-    INVOKE MsSince, startTime               ; EAX = milliseconds since the start
-    mov  edx, 0                             ; clear EDX before DIV
-    mov  ecx, 1000                          ; 1000 ms in a second
-    div  ecx                                ; EAX = whole seconds
-    ret                                     ; back to caller
+    INVOKE MsSince, startTime
+    mov  edx, 0
+    mov  ecx, 1000
+    div  ecx
+    ret
 GetElapsedSec ENDP
 
-;-------------------------------------------------------------
-; GetRemainingSec
-; Purpose:   How many seconds are left before time runs out.
-; Receives:  nothing (uses TIME_LIMIT, startTime)
-; Returns:   EAX = TIME_LIMIT - elapsed, never below 0
-; Registers: EAX (EBX saved by USES)
-;-------------------------------------------------------------
+; Seconds left on the timer
 GetRemainingSec PROC USES ebx
-    call GetElapsedSec                      ; EAX = seconds used
-    mov  ebx, TIME_LIMIT                    ; EBX = seconds allowed
-    sub  ebx, eax                           ; EBX = seconds left
-    jge  TimeLeftOK                         ; 0 or more: fine (signed check)
-    mov  ebx, 0                             ; below 0: show 0
+    call GetElapsedSec
+    mov  ebx, TIME_LIMIT
+    sub  ebx, eax
+    jge  TimeLeftOK
+    mov  ebx, 0
 TimeLeftOK:
-    mov  eax, ebx                           ; return the value in EAX
-    ret                                     ; back to caller
+    mov  eax, ebx
+    ret
 GetRemainingSec ENDP
 
-;-------------------------------------------------------------
-; PutNumber
-; Purpose:   Write a number as decimal digits into memory,
-;            with leading zeros (e.g. 7 with 2 digits = "07").
-;            Digits are made from right to left: value mod 10
-;            is the last digit, then divide by 10, repeat.
-; Receives:  dest   = address of the first digit
-;            value  = number to write
-;            digits = how many digits to write
-; Returns:   nothing (memory at dest changed)
-; Registers: none (EAX, EBX, ECX, EDX, EDI saved by USES)
-;-------------------------------------------------------------
+; Write a number as digits into memory
 PutNumber PROC USES eax ebx ecx edx edi, dest:PTR BYTE, value:DWORD, digits:DWORD
-    mov  edi, dest                          ; EDI = first digit position
-    add  edi, digits                        ; move past the last digit
-    dec  edi                                ; EDI = last digit position
-    mov  eax, value                         ; EAX = number to write
-    mov  ebx, 10                            ; we divide by 10
-    mov  ecx, digits                        ; ECX = digits to write
+    mov  edi, dest
+    add  edi, digits
+    dec  edi
+    mov  eax, value
+    mov  ebx, 10
+    mov  ecx, digits
 DigitLoop:
-    mov  edx, 0                             ; clear EDX before DIV
-    div  ebx                                ; EAX = value / 10, EDX = last digit
-    add  dl, '0'                            ; turn 0..9 into '0'..'9'
-    mov  [edi], dl                          ; store the digit
-    dec  edi                                ; move one place to the left
-    loop DigitLoop                          ; ECX--, repeat for every digit
-    ret                                     ; back to caller
+    mov  edx, 0
+    div  ebx
+    add  dl, '0'
+    mov  [edi], dl
+    dec  edi
+    loop DigitLoop
+    ret
 PutNumber ENDP
 
-;-------------------------------------------------------------
-; DrawHUD
-; Purpose:   Fill the HUD row (row 24) of frameBuffer:
-;            "TIME mm:ss  STEPS nnnnn  W/S move ..."
-;            Copy the template, then write the numbers in.
-;            The timer is white (danger red under 20 s),
-;            "KEYS n/3" is gold, labels keep the normal gray.
-; Receives:  nothing (uses steps and the timer)
-; Returns:   nothing (frameBuffer HUD row changed)
-; Registers: none (EAX, EBX, ECX, EDX, ESI, EDI saved by USES)
-;-------------------------------------------------------------
+; Fill the HUD row: time, steps, keys, controls
 DrawHUD PROC USES eax ebx ecx edx esi edi
-    cld                                     ; copy forwards
-    mov  esi, OFFSET hudTemplate            ; ESI = template text
-    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W ; EDI = start of the HUD row
-    mov  ecx, HUD_LEN                       ; ECX = template length
-    rep  movsb                              ; copy the template into the HUD row
-    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W ; EDI = start of the HUD row again
-    call GetRemainingSec                    ; EAX = seconds left
-    mov  edx, 0                             ; clear EDX before DIV
-    mov  ebx, 60                            ; 60 seconds in a minute
-    div  ebx                                ; EAX = minutes, EDX = seconds
-    mov  ecx, edi                           ; ECX = HUD row start
-    add  ecx, HUD_MIN_POS                   ; ECX = where the minutes go
-    INVOKE PutNumber, ecx, eax, 2           ; write mm
-    mov  ecx, edi                           ; ECX = HUD row start
-    add  ecx, HUD_SEC_POS                   ; ECX = where the seconds go
-    INVOKE PutNumber, ecx, edx, 2           ; write ss
-    mov  ecx, edi                           ; ECX = HUD row start
-    add  ecx, HUD_STEP_POS                  ; ECX = where the steps go
-    INVOKE PutNumber, ecx, steps, 5         ; write the step count (5 digits)
-    mov  ecx, edi                           ; ECX = HUD row start
-    add  ecx, HUD_KEY_POS                   ; ECX = where the key count goes
-    INVOKE PutNumber, ecx, keys, 1          ; write the key count (1 digit)
-    call DrawMessage                        ; "KEY FOUND" / "DOOR LOCKED" over the controls
-    call GetRemainingSec                    ; EAX = seconds left
-    mov  edx, TIMER_ATTR                    ; assume plenty of time: bright white
-    cmp  eax, LOW_TIME                      ; under 20 seconds left?
-    jae  HaveTimerColor                     ; no: keep white
-    mov  edx, TIMER_LOW_ATTR                ; yes: danger red warning
+    cld
+    mov  esi, OFFSET hudTemplate
+    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W
+    mov  ecx, HUD_LEN
+    rep  movsb
+    mov  edi, OFFSET frameBuffer + HUD_ROW * SCREEN_W
+    call GetRemainingSec
+    mov  edx, 0
+    mov  ebx, 60
+    div  ebx
+    mov  ecx, edi
+    add  ecx, HUD_MIN_POS
+    INVOKE PutNumber, ecx, eax, 2
+    mov  ecx, edi
+    add  ecx, HUD_SEC_POS
+    INVOKE PutNumber, ecx, edx, 2
+    mov  ecx, edi
+    add  ecx, HUD_STEP_POS
+    INVOKE PutNumber, ecx, steps, 5
+    mov  ecx, edi
+    add  ecx, HUD_KEY_POS
+    INVOKE PutNumber, ecx, keys, 1
+    call DrawMessage
+    call GetRemainingSec
+    mov  edx, TIMER_ATTR
+    cmp  eax, LOW_TIME
+    jae  HaveTimerColor
+    mov  edx, TIMER_LOW_ATTR
 HaveTimerColor:
-    mov  eax, edx                           ; AX = timer colour
-    mov  edi, OFFSET attrBuffer + HUD_ROW * SCREEN_W * 2 ; EDI = colours of the HUD row
-    mov  ecx, HUD_TIME_LEN                  ; ECX = "TIME mm:ss" = 10 cells
-    rep  stosw                              ; colour the timer (labels stay light gray)
-    mov  eax, KEYS_ATTR                     ; AX = gold
-    mov  edi, OFFSET attrBuffer + (HUD_ROW * SCREEN_W + HUD_KEYS_COL) * 2 ; EDI = "KEYS n/3" colours
-    mov  ecx, HUD_KEYS_LEN                  ; ECX = 8 cells
-    rep  stosw                              ; colour "KEYS n/3"
-    ret                                     ; back to caller
+    mov  eax, edx
+    mov  edi, OFFSET attrBuffer + HUD_ROW * SCREEN_W * 2
+    mov  ecx, HUD_TIME_LEN
+    rep  stosw
+    mov  eax, KEYS_ATTR
+    mov  edi, OFFSET attrBuffer + (HUD_ROW * SCREEN_W + HUD_KEYS_COL) * 2
+    mov  ecx, HUD_KEYS_LEN
+    rep  stosw
+    ret
 DrawHUD ENDP
 
-;-------------------------------------------------------------
-; PrintTwoDigits
-; Purpose:   Print a number 0..99 on the console with two
-;            digits (adds a leading 0 below 10, e.g. "07").
-; Receives:  EAX = number (0..99)
-; Returns:   nothing
-; Registers: none (EAX saved by USES)
-;-------------------------------------------------------------
+; Print a number with two digits
 PrintTwoDigits PROC USES eax
-    cmp  eax, 10                            ; one digit only?
-    jae  TwoDigits                          ; no: print as it is
-    push eax                                ; keep the number
-    mov  al, '0'                            ; leading zero
-    call WriteChar                          ; print it
-    pop  eax                                ; number again
+    cmp  eax, 10
+    jae  TwoDigits
+    push eax
+    mov  al, '0'
+    call WriteChar
+    pop  eax
 TwoDigits:
-    call WriteDec                           ; print the number
-    ret                                     ; back to caller
+    call WriteDec
+    ret
 PrintTwoDigits ENDP
 
-;-------------------------------------------------------------
-; PrintTime
-; Purpose:   Print a number of seconds as mm:ss.
-; Receives:  EAX = seconds
-; Returns:   nothing
-; Registers: none (EAX, EBX, EDX saved by USES)
-;-------------------------------------------------------------
+; Print seconds as mm:ss
 PrintTime PROC USES eax ebx edx
-    mov  edx, 0                             ; clear EDX before DIV
-    mov  ebx, 60                            ; 60 seconds in a minute
-    div  ebx                                ; EAX = minutes, EDX = seconds
-    call PrintTwoDigits                     ; print mm
-    mov  al, ':'                            ; separator
-    call WriteChar                          ; print it
-    mov  eax, edx                           ; EAX = seconds
-    call PrintTwoDigits                     ; print ss
-    ret                                     ; back to caller
+    mov  edx, 0
+    mov  ebx, 60
+    div  ebx
+    call PrintTwoDigits
+    mov  al, ':'
+    call WriteChar
+    mov  eax, edx
+    call PrintTwoDigits
+    ret
 PrintTime ENDP
 
-;-------------------------------------------------------------
-; WinScreen
-; Purpose:   Clear the screen and show a gold block-letter
-;            "ESCAPED!" banner, the time taken (mm:ss), the
-;            number of steps and the keys collected. Leaves the cursor where
-;            AskPlayAgain should print its question.
-; Receives:  nothing (uses timer and steps)
-; Returns:   nothing
-; Registers: none (EAX, EDX saved by USES)
-;-------------------------------------------------------------
+; Win screen: ESCAPED!, time, steps, keys
 WinScreen PROC USES eax edx
-    call Clrscr                             ; clear the console
-    INVOKE PrintArt, ADDR winArt, ADDR winColors, ART_LINES, BANNER_ROW, WIN_COL ; gold banner
-    mov  eax, C_WHITE                       ; white text
-    call SetRoleColor                      ; apply the colour
-    mov  dh, INFO_ROW                       ; first info line
-    mov  dl, INFO_COL                       ; info column
-    call Gotoxy                             ; move the cursor there
-    mov  edx, OFFSET timeMsg                ; "Time taken: "
-    call WriteString                        ; print it
-    call GetElapsedSec                      ; EAX = seconds used
-    call PrintTime                          ; print mm:ss
-    mov  dh, INFO_ROW + 1                   ; second info line
-    mov  dl, INFO_COL                       ; info column
-    call Gotoxy                             ; move the cursor there
-    mov  edx, OFFSET stepsMsg               ; "Steps: "
-    call WriteString                        ; print it
-    mov  eax, steps                         ; EAX = step count
-    call WriteDec                           ; print it
-    mov  dh, INFO_ROW + 2                   ; third info line
-    mov  dl, INFO_COL                       ; info column
-    call Gotoxy                             ; move the cursor there
-    mov  edx, OFFSET keysMsg                ; "Keys: "
-    call WriteString                        ; print it
-    mov  eax, keys                          ; EAX = keys collected
-    call WriteDec                           ; print it
-    mov  edx, OFFSET keysOf                 ; "/3"
-    call WriteString                        ; print it
-    mov  dh, ASK_ROW                        ; row for "Play again?"
-    mov  dl, INFO_COL                       ; info column
-    call Gotoxy                             ; leave the cursor there
-    ret                                     ; back to caller
+    call Clrscr
+    INVOKE PrintArt, ADDR winArt, ADDR winColors, ART_LINES, BANNER_ROW, WIN_COL
+    mov  eax, C_WHITE
+    call SetRoleColor
+    mov  dh, INFO_ROW
+    mov  dl, INFO_COL
+    call Gotoxy
+    mov  edx, OFFSET timeMsg
+    call WriteString
+    call GetElapsedSec
+    call PrintTime
+    mov  dh, INFO_ROW + 1
+    mov  dl, INFO_COL
+    call Gotoxy
+    mov  edx, OFFSET stepsMsg
+    call WriteString
+    mov  eax, steps
+    call WriteDec
+    mov  dh, INFO_ROW + 2
+    mov  dl, INFO_COL
+    call Gotoxy
+    mov  edx, OFFSET keysMsg
+    call WriteString
+    mov  eax, keys
+    call WriteDec
+    mov  edx, OFFSET keysOf
+    call WriteString
+    mov  dh, ASK_ROW
+    mov  dl, INFO_COL
+    call Gotoxy
+    ret
 WinScreen ENDP
 
-;-------------------------------------------------------------
-; LoseScreen
-; Purpose:   Clear the screen and show a danger-red block-letter
-;            "TIME UP" banner and the number of steps. Leaves
-;            the cursor where AskPlayAgain should print.
-; Receives:  nothing (uses steps)
-; Returns:   nothing
-; Registers: none (EAX, EDX saved by USES)
-;-------------------------------------------------------------
+; Lose screen: TIME UP, steps
 LoseScreen PROC USES eax edx
-    call Clrscr                             ; clear the console
-    INVOKE PrintArt, ADDR loseArt, ADDR loseColors, ART_LINES, BANNER_ROW, LOSE_COL ; red banner
-    mov  eax, C_WHITE                       ; white text
-    call SetRoleColor                      ; apply the colour
-    mov  dh, INFO_ROW                       ; first info line
-    mov  dl, INFO_COL                       ; info column
-    call Gotoxy                             ; move the cursor there
-    mov  edx, OFFSET loseText               ; "You did not reach the exit in time."
-    call WriteString                        ; print it
-    mov  dh, INFO_ROW + 1                   ; second info line
-    mov  dl, INFO_COL                       ; info column
-    call Gotoxy                             ; move the cursor there
-    mov  edx, OFFSET stepsMsg               ; "Steps: "
-    call WriteString                        ; print it
-    mov  eax, steps                         ; EAX = step count
-    call WriteDec                           ; print it
-    mov  dh, ASK_ROW                        ; row for "Play again?"
-    mov  dl, INFO_COL                       ; info column
-    call Gotoxy                             ; leave the cursor there
-    ret                                     ; back to caller
+    call Clrscr
+    INVOKE PrintArt, ADDR loseArt, ADDR loseColors, ART_LINES, BANNER_ROW, LOSE_COL
+    mov  eax, C_WHITE
+    call SetRoleColor
+    mov  dh, INFO_ROW
+    mov  dl, INFO_COL
+    call Gotoxy
+    mov  edx, OFFSET loseText
+    call WriteString
+    mov  dh, INFO_ROW + 1
+    mov  dl, INFO_COL
+    call Gotoxy
+    mov  edx, OFFSET stepsMsg
+    call WriteString
+    mov  eax, steps
+    call WriteDec
+    mov  dh, ASK_ROW
+    mov  dl, INFO_COL
+    call Gotoxy
+    ret
 LoseScreen ENDP
 
-;-------------------------------------------------------------
-; AskPlayAgain
-; Purpose:   Ask "Play again? (Y/N)" and wait for Y, N or Q
-;            (other keys are ignored).
-; Receives:  nothing
-; Returns:   EAX = 1 for Y, 0 for N or Q
-; Registers: EAX (ECX, EDX saved by USES)
-;-------------------------------------------------------------
+; Ask Play again? (Y/N)
 AskPlayAgain PROC USES ecx edx
-    INVOKE FlushConsoleInputBuffer, inputHandle ; forget keys pressed during the game
-    mov  eax, DEFAULT_ATTR                  ; normal grey text
-    call SetRoleColor                      ; apply the colour
-    mov  edx, OFFSET againMsg               ; "Play again? (Y/N)"
-    call WriteString                        ; print it
+    INVOKE FlushConsoleInputBuffer, inputHandle
+    mov  eax, DEFAULT_ATTR
+    call SetRoleColor
+    mov  edx, OFFSET againMsg
+    call WriteString
 AskLoop:
-    call ReadChar                           ; wait for a key, AL = key
-    and  al, 11011111b                      ; make it uppercase
-    cmp  al, 'Y'                            ; yes?
-    je   AnswerYes                          ; play again
-    cmp  al, 'N'                            ; no?
-    je   AnswerNo                           ; stop
-    cmp  al, 'Q'                            ; quit?
-    je   AnswerNo                           ; stop
-    jmp  AskLoop                            ; any other key: ask again
+    call ReadChar
+    and  al, 11011111b
+    cmp  al, 'Y'
+    je   AnswerYes
+    cmp  al, 'N'
+    je   AnswerNo
+    cmp  al, 'Q'
+    je   AnswerNo
+    jmp  AskLoop
 AnswerYes:
-    mov  eax, 1                             ; return 1
-    ret                                     ; back to caller
+    mov  eax, 1
+    ret
 AnswerNo:
-    mov  eax, 0                             ; return 0
-    ret                                     ; back to caller
+    mov  eax, 0
+    ret
 AskPlayAgain ENDP
 
-;-------------------------------------------------------------
-; GameLoop
-; Purpose:   Run frames until the game ends:
-;            input -> check quit/win/time -> clear -> 3D view
-;            -> minimap -> HUD -> draw -> wait 30 ms.
-; Receives:  nothing
-; Returns:   EAX = RESULT_QUIT, RESULT_WIN or RESULT_LOSE
-; Registers: EAX
-;-------------------------------------------------------------
+; One frame after another until win, lose or quit
 GameLoop PROC
 FrameLoop:
-    call HandleInput                        ; read keys, move/turn the player
-    cmp  quitFlag, 1                        ; did the player press Q?
-    je   GameQuit                           ; yes
-    cmp  wonFlag, 1                         ; did the player touch the exit?
-    je   GameWon                            ; yes
-    call GetRemainingSec                    ; EAX = seconds left
-    cmp  eax, 0                             ; time up?
-    je   GameLost                           ; yes
-    call UpdateBlink                        ; blink phase for this frame
-    call ClearBuffer                        ; blank frame
-    call RenderView                         ; 3D walls into the buffer
-    call DrawMinimap                        ; map + player on top (only if switched on)
-    call DrawHUD                            ; time, steps, controls on the last row
-    call ComposeFrame                       ; pixels + text -> console in one call
-    mov  eax, 30                            ; 30 milliseconds
-    call Delay                              ; wait before the next frame
-    jmp  FrameLoop                          ; next frame
+    call HandleInput
+    cmp  quitFlag, 1
+    je   GameQuit
+    cmp  wonFlag, 1
+    je   GameWon
+    call GetRemainingSec
+    cmp  eax, 0
+    je   GameLost
+    call UpdateBlink
+    call ClearBuffer
+    call RenderView
+    call DrawMinimap
+    call DrawHUD
+    call ComposeFrame
+    mov  eax, 30
+    call Delay
+    jmp  FrameLoop
 GameQuit:
-    mov  eax, RESULT_QUIT                   ; ended by Q
-    ret                                     ; back to caller
+    mov  eax, RESULT_QUIT
+    ret
 GameWon:
-    mov  eax, RESULT_WIN                    ; ended by reaching the exit
-    ret                                     ; back to caller
+    mov  eax, RESULT_WIN
+    ret
 GameLost:
-    mov  eax, RESULT_LOSE                   ; ended by the timer
-    ret                                     ; back to caller
+    mov  eax, RESULT_LOSE
+    ret
 GameLoop ENDP
 
-END main                                    ; program starts at main
+END main
