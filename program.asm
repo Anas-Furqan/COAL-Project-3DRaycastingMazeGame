@@ -1634,7 +1634,7 @@ HaveGap:
     ret
 SetupAxis ENDP
 
-; Cast one ray with DDA and return the distance to the wall
+; Cast one w with DDA and return the distance to the wall
 CastRay PROC USES ebx esi edi, rayDirX:SDWORD, rayDirY:SDWORD
     LOCAL mapX:SDWORD, mapY:SDWORD
     LOCAL stepX:SDWORD, stepY:SDWORD
